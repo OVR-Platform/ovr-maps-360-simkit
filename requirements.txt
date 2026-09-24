@@ -1,0 +1,11 @@
+# Versions the 50-scene sample was built and certified with.
+numpy==2.2.6
+scipy==1.17.1
+open3d==0.19.0
+trimesh==5.1.0
+pillow==12.3.0
+opencv-python-headless==5.0.0.93
+mujoco==3.14.0
+usd-core==26.8
+coacd==1.0.14
+pytest>=8

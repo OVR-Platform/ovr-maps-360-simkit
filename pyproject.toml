@@ -1,0 +1,17 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ovr-maps-360-simkit"
+version = "1.0.0"
+description = "Simulation bundles, physics certification and LODs for OVR Maps 360 scenes"
+readme = "README.md"
+license = { text = "Apache-2.0" }
+requires-python = ">=3.10"
+
+[project.scripts]
+simkit = "simkit.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["simkit*"]
