@@ -136,6 +136,21 @@ def test_largest_connected_region_drops_unreachable_patches():
     assert not kept.grid[4:6, 15:17].any()
 
 
+def test_seeds_keep_the_walked_region_not_the_biggest():
+    """A kerb splits the scene; the operator walked on the small side."""
+    grid = np.zeros((10, 30), dtype=bool)
+    grid[2:8, 1:8] = True    # the walked yard, 42 cells
+    grid[2:8, 12:29] = True  # a bigger yard past a kerb, 102 cells
+    ground = np.zeros(grid.shape); ground[:, 12:] = 0.4
+    navmesh = Navmesh(grid, ground, np.zeros(2), 0.1)
+
+    kept = largest_connected_region(navmesh, seed_points=np.array([[0.45, 0.45]]))
+    assert kept.grid[2:8, 1:8].all() and not kept.grid[:, 12:].any()
+
+    default = largest_connected_region(navmesh)
+    assert default.grid[:, 12:29].any() and not default.grid[:, 1:8].any()
+
+
 def test_navmesh_area_uses_cell_size():
     grid = np.ones((4, 4), dtype=bool)
     navmesh = Navmesh(grid, np.zeros((4, 4)), np.zeros(2), 0.5)
@@ -149,6 +164,43 @@ def test_sample_points_carry_their_ground_height():
 
     assert samples.shape == (5, 3)
     np.testing.assert_allclose(samples[:, 2], 1.25)
+
+
+class FakeTriangleMesh(FakeMesh):
+    """A real surface: build_navmesh samples its triangles, not its vertices."""
+
+    def __init__(self, vertices, triangles):
+        super().__init__(vertices, np.zeros((len(vertices), 3)))
+        self.triangles = np.asarray(triangles, dtype=np.int64)
+
+
+def test_a_floor_made_of_two_large_triangles_is_walkable_everywhere():
+    """Four vertices, 100 m2 of floor: vertex counting saw four cells of ground
+    and 396 of void. The surface is what is walked on, so it is what is read."""
+    quad = np.array([[0, 0, 0], [10, 0, 0], [10, 10, 0], [0, 10, 0]], dtype=float)
+    navmesh = build_navmesh(FakeTriangleMesh(quad, [[0, 1, 2], [0, 2, 3]]), cell_size=0.5)
+
+    assert navmesh.area_m2 == pytest.approx(100.0, rel=0.05)
+
+
+def test_a_large_panel_facing_down_is_a_ceiling_not_a_floor():
+    quad = np.array([[0, 0, 0], [10, 0, 0], [10, 10, 0], [0, 10, 0]], dtype=float)
+    navmesh = build_navmesh(FakeTriangleMesh(quad, [[0, 2, 1], [0, 3, 2]]), cell_size=0.5)
+
+    assert not navmesh.grid.any()
+
+
+def test_a_thin_post_still_blocks_its_cell():
+    quad = np.array([[0, 0, 0], [4, 0, 0], [4, 4, 0], [0, 4, 0]], dtype=float)
+    post = np.array([[2.0, 2.0, 0.0], [2.05, 2.0, 0.0], [2.05, 2.0, 1.2], [2.0, 2.0, 1.2]])
+    vertices = np.vstack([quad, post])
+    faces = [[0, 1, 2], [0, 2, 3], [4, 5, 6], [4, 6, 7], [6, 5, 4], [7, 6, 4]]
+    navmesh = build_navmesh(FakeTriangleMesh(vertices, faces), cell_size=0.5)
+
+    column = int((2.02 - navmesh.origin[0]) / navmesh.cell_size)
+    row = int((2.0 - navmesh.origin[1]) / navmesh.cell_size)
+    assert not navmesh.grid[row, column]
+    assert navmesh.area_m2 == pytest.approx(16.0, abs=1.5)
 
 
 def test_empty_mesh_yields_empty_navmesh():

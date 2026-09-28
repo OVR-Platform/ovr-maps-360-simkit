@@ -1,4 +1,4 @@
-"""The acceptance gate: nine checks, every one measured on the built bundle.
+"""The acceptance gate: eight checks, every one measured on the built bundle.
 
 A bundle that fails any check does not ship. Thresholds are part of the
 contract and are never relaxed to make a scene pass.
@@ -18,16 +18,24 @@ Orientation and frame (measured, not asserted):
   median, 1.9 deg p90, over the 50 scenes of the sample). The measured tilt is
   therefore the smaller of the two, and the threshold is set where it catches a
   broken alignment: 2 deg of gravity error is a 3.5% slope under a robot's feet.
-- ``witnesses_agree_under_0p5deg``: the plane of the walked trajectory against
-  the plane of the ground found directly beneath it. Two independent sources,
-  the camera poses and the mesh, must describe the same attitude.
 - ``floor_at_origin_under_5cm``: the navmesh's ground against the floor the
   operator actually stood on. Under every camera whose cell is walkable, the
   navmesh ground height is compared with the surface found by a ray cast
   straight down from that camera; the median absolute difference must stay
-  under 5 cm. The frame puts the median walked floor at z = 0, so this is also
-  where the origin is certified. Compared per camera, not as two medians, so a
-  street climbing several metres does not read as a misplaced floor.
+  under 5 cm, **and at least 20% of the cameras must stand on a walkable
+  cell**, otherwise the comparison has nothing to say and the navmesh does not
+  cover the walk. The frame puts the median walked floor at z = 0, so this is
+  also where the origin is certified. Compared per camera, not as two medians,
+  so a street climbing several metres does not read as a misplaced floor.
+
+Not a check, recorded only: the angle between the plane of the camera
+trajectory and the plane of the ground beneath it (``witness_disagreement_deg``).
+It used to be gated at 0.5 deg, but the trajectory plane tilts whenever the
+operator raises or lowers the pole along the walk (45 cm of pole travel over
+100 m is 0.3-1 deg), so it measured the operator, not the scene: over the 50
+scenes of the sample the walls were plumb to 0.6 deg median, 1.7 deg max, and
+every failure of that check came with the ground under the cameras within
+1 mm of the navmesh.
 - ``alignment_residual_under_25cm``: median distance from the splat's solid
   Gaussians to the collision surface, inside the walked corridor. The two
   layers are separate reconstructions of one capture; this is how far apart
@@ -47,8 +55,7 @@ CHECK_TABLE = [
     # key, label, threshold (as printed in the certificate)
     ("up_direction_verified", "up direction verified (splat slab + ground under cameras)", "decidable, not inverted"),
     ("scene_plumb_under_2deg", "scene plumb (walls vs frame vertical)", "< 2 deg"),
-    ("witnesses_agree_under_0p5deg", "witnesses agree (walk plane vs ground plane)", "< 0.5 deg"),
-    ("floor_at_origin_under_5cm", "floor registered (navmesh vs ground under cameras)", "< 5 cm"),
+    ("floor_at_origin_under_5cm", "floor registered (navmesh under >= 20% of the walk, vs ground under cameras)", "< 5 cm"),
     ("alignment_residual_under_25cm", "alignment residual, splat to collision surface", "< 25 cm"),
     ("walkable_area_over_5m2", "walkable area", ">= 5 m2"),
     ("no_collision_leak", "no collision leak (no probe falls through)", "0%"),
@@ -67,14 +74,14 @@ def evaluate_gate(
     walkable_area_m2: float,
     physics: dict,
 ) -> dict:
-    """Apply the nine checks. Missing evidence counts as failure."""
+    """Apply the eight checks. Missing evidence counts as failure."""
     checks = {
         "up_direction_verified": bool(up_verdict.get("decidable"))
         and not up_verdict.get("inverted", True)
         and walk.get("grounded_fraction", 0.0) >= 0.9,
         "scene_plumb_under_2deg": plumb.get("tilt_deg", float("inf")) < 2.0,
-        "witnesses_agree_under_0p5deg": walk.get("mesh_agreement_deg", float("inf")) < 0.5,
-        "floor_at_origin_under_5cm": floor_registration.get("median_abs_m", float("inf")) < 0.05,
+        "floor_at_origin_under_5cm": floor_registration.get("walkable_fraction", 0.0) >= 0.2
+        and floor_registration.get("median_abs_m", float("inf")) < 0.05,
         "alignment_residual_under_25cm": layer_residual.get("median_m", float("inf")) < 0.25,
         "walkable_area_over_5m2": walkable_area_m2 >= 5.0,
         "no_collision_leak": physics.get("leak_rate", 1.0) == 0.0,

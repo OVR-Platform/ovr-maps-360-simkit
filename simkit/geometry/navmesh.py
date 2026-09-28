@@ -67,33 +67,56 @@ class Navmesh:
         }
 
 
-def cell_size_for(mesh, *, min_floor_hits: int = 2, margin: float = 3.0,
-                  smallest: float = 0.15, largest: float = 0.60) -> float:
-    """A cell size the mesh is actually dense enough to fill.
+def cell_size_for(mesh, *, foot_m: float = 0.25, smallest: float = 0.15, largest: float = 0.60) -> float:
+    """The cell size of the walkable grid: a foot, whatever the mesh's resolution.
 
-    A cell needs ``min_floor_hits`` vertices in it before it counts as ground,
-    so the grid can only be as fine as the reconstruction is dense. These two
-    corpora differ by more than two orders of magnitude — a LiDAR-fused indoor
-    capture carries ~2,400 vertices per m², while a 360 mapping decimated to a
-    fixed 500k triangles over open ground carries ~9. At 0.2 m the sparse one
-    expects 0.4 vertices per cell, so almost every cell fails the threshold and
-    the navmesh comes out empty: measured, 0.3 m² of walkable ground where 0.5 m
-    cells find 1,950.
-
-    Returning a size instead of a constant makes the grid follow the data. It is
-    clamped: below ``smallest`` there is nothing to gain over the mesh's own
-    resolution, and above ``largest`` a cell stops describing anything a foot
-    could be placed on.
+    Walkability used to be decided from the mesh's *vertices*, so the grid could
+    only be as fine as the reconstruction was dense, and this function derived a
+    size from the vertex density. That broke on meshes whose floor is a few large
+    coplanar panels (the MoGe floor fill merges them): a 30 m slab carries four
+    vertices, so almost every cell on it held none and the floor read as void
+    although a ray cast from every camera hit it. The grid now samples the
+    surface of every triangle (``surface_samples``), which makes the density a
+    parameter rather than a property of the mesh, and the cell size is simply
+    the size of the thing that has to fit in it. Clamped to the same range as
+    before so an explicit ``--cell-size`` keeps meaning what it meant.
     """
-    vertices = np.asarray(mesh.vertices)
-    if len(vertices) < 100:
-        return largest
+    return float(np.clip(foot_m, smallest, largest))
 
-    span = vertices[:, :2].max(axis=0) - vertices[:, :2].min(axis=0)
-    area = float(max(span[0] * span[1], 1e-6))
-    density = len(vertices) / area
-    needed = np.sqrt(margin * min_floor_hits / max(density, 1e-9))
-    return float(np.clip(needed, smallest, largest))
+
+def surface_samples(vertices: np.ndarray, faces: np.ndarray, cell_size: float, *,
+                    per_cell: float = 10.0, cap: int = 12_000_000, seed: int = 0) -> tuple[np.ndarray, np.ndarray]:
+    """Points spread uniformly over the surface, ``per_cell`` of them per cell of
+    area, each carrying the normal of its triangle.
+
+    Every triangle gets at least one sample, so a thin post still blocks the
+    cell it stands in; a large panel gets as many as its area asks for, so a
+    floor made of four triangles fills every cell it covers. Area-weighted and
+    barycentric-uniform; ten per cell on average, so a cell of flat ground misses
+    the two-sample ground threshold with probability 5e-4, not 9% as at four.
+    """
+    vertices = np.asarray(vertices, dtype=np.float64)
+    faces = np.asarray(faces, dtype=np.int64)
+    if len(faces) == 0:
+        return np.zeros((0, 3)), np.zeros((0, 3))
+    corners = vertices[faces]
+    cross = np.cross(corners[:, 1] - corners[:, 0], corners[:, 2] - corners[:, 0])
+    twice_area = np.linalg.norm(cross, axis=1)
+    live = twice_area > 1e-12
+    normals = np.zeros_like(cross)
+    normals[live] = cross[live] / twice_area[live, None]
+    count = np.maximum(1, np.ceil(per_cell * (twice_area / 2.0) / cell_size**2)).astype(np.int64)
+    count[~live] = 0
+    total = int(count.sum())
+    if total > cap:  # keep the run bounded on a pathological mesh; still >= 1 per triangle
+        count = np.maximum(live.astype(np.int64), np.floor(count * (cap / total)).astype(np.int64))
+    which = np.repeat(np.arange(len(faces)), count)
+    rng = np.random.default_rng(seed)
+    r1, r2 = rng.random(len(which)), rng.random(len(which))
+    root = np.sqrt(r1)
+    bary = np.column_stack([1.0 - root, root * (1.0 - r2), root * r2])
+    points = np.einsum("nk,nkd->nd", bary, corners[which])
+    return points, normals[which]
 
 
 def build_navmesh(
@@ -104,15 +127,26 @@ def build_navmesh(
     clearance_m: float = 1.6,
     max_step_m: float = 0.25,
     min_floor_hits: int = 2,
+    seed_points: np.ndarray | None = None,
 ) -> Navmesh:
     """Rasterise walkable ground from a surface mesh.
+
+    The grid reads the *surface* of the mesh, not its vertices: every triangle is
+    sampled in proportion to its area (``surface_samples``), so a floor made of
+    a handful of large panels fills its cells exactly like a floor made of a
+    million small ones. A mesh without triangles (a point set with normals) is
+    read as it is.
 
     ``clearance_m`` rejects ground a humanoid cannot occupy — under tables,
     inside shelving, beneath a low soffit. ``max_step_m`` rejects ground that is
     only reachable by a jump: a kerb is climbable, a 2 m wall is not.
     """
-    vertices = np.asarray(mesh.vertices)
-    normals = np.asarray(mesh.vertex_normals)
+    faces = np.asarray(getattr(mesh, "triangles", np.zeros((0, 3), dtype=np.int64)))
+    if len(faces):
+        vertices, normals = surface_samples(np.asarray(mesh.vertices), faces, cell_size)
+    else:
+        vertices = np.asarray(mesh.vertices)
+        normals = np.asarray(mesh.vertex_normals)
     if len(vertices) == 0:
         return Navmesh(np.zeros((0, 0), dtype=bool), np.zeros((0, 0)), np.zeros(2), cell_size)
 
@@ -126,7 +160,7 @@ def build_navmesh(
     flat_index = rows * width + columns
     cells = width * height
 
-    # 1. Ground height per cell: the lowest *upward-facing* surface in it.
+    # 1. Ground height per cell: the lowest *upward-facing* surface sample in it.
     #
     # The normal's sign matters, and |n_z| is a real bug: it accepts a ceiling, a
     # mezzanine underside or the bottom of a pallet as ground. On a factory scene
@@ -153,18 +187,28 @@ def build_navmesh(
     ground_grid = ground.reshape(height, width)
     navmesh = Navmesh(grid, ground_grid, lower, cell_size)
 
-    # 3. Keep only what a robot can actually reach on foot.
-    return largest_connected_region(navmesh, max_step_m=max_step_m)
+    # 3. Keep only what a robot can actually reach on foot: from where the
+    # operator walked when we know it (``seed_points``, world XY), else the
+    # largest region.
+    return largest_connected_region(navmesh, max_step_m=max_step_m, seed_points=seed_points)
 
 
-def largest_connected_region(navmesh: Navmesh, *, max_step_m: float = 0.25) -> Navmesh:
-    """Keep the biggest region a robot can actually traverse.
+def largest_connected_region(navmesh: Navmesh, *, max_step_m: float = 0.25,
+                             seed_points: np.ndarray | None = None) -> Navmesh:
+    """Keep the region(s) a robot can actually traverse.
 
     Connectivity is **height-aware**: adjacent cells count as connected only if
     the step between their ground heights is climbable. Plan-view connectivity
     alone would merge a rooftop or balcony with the courtyard below it merely
     because they touch when seen from above — and then report the union as
     walkable area a policy could never use.
+
+    With ``seed_points`` (world XY, the ground under the cameras) every region
+    that the walk touches is kept: that is where the operator went, so that is
+    where a robot is expected to go. Without seeds the largest region is kept,
+    which on a scene cut into pieces by kerbs and steps can be a courtyard the
+    operator never entered while the walked corridor is dropped (measured: 895
+    of 2199 m2 kept, 12% of the cameras on it).
     """
     grid = navmesh.grid
     ground = navmesh.ground_z
@@ -198,6 +242,14 @@ def largest_connected_region(navmesh: Navmesh, *, max_step_m: float = 0.25) -> N
 
     if not sizes:
         return navmesh
-    keep = int(np.argmax(sizes)) + 1
-    kept = labels == keep
+    wanted: set[int] = set()
+    if seed_points is not None and len(seed_points):
+        seeds = np.asarray(seed_points, dtype=np.float64)[:, :2]
+        cols = np.floor((seeds[:, 0] - navmesh.origin[0]) / navmesh.cell_size).astype(int)
+        rows = np.floor((seeds[:, 1] - navmesh.origin[1]) / navmesh.cell_size).astype(int)
+        inside = (rows >= 0) & (rows < grid.shape[0]) & (cols >= 0) & (cols < grid.shape[1])
+        wanted = set(int(v) for v in labels[rows[inside], cols[inside]] if v)
+    if not wanted:
+        wanted = {int(np.argmax(sizes)) + 1}
+    kept = np.isin(labels, sorted(wanted))
     return Navmesh(kept, np.where(kept, ground, np.nan), navmesh.origin, navmesh.cell_size)

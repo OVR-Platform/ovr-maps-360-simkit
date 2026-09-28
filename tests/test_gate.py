@@ -1,4 +1,4 @@
-"""The nine checks, and that missing evidence fails closed."""
+"""The eight checks, and that missing evidence fails closed."""
 
 import numpy as np
 
@@ -17,7 +17,7 @@ GOOD = dict(
 
 def test_a_good_bundle_passes():
     qa = evaluate_gate(**GOOD)
-    assert qa["passed"] and len(qa["checks"]) == 9 == len(CHECK_TABLE)
+    assert qa["passed"] and len(qa["checks"]) == 8 == len(CHECK_TABLE)
     assert set(qa["checks"]) == {key for key, _, _ in CHECK_TABLE}
 
 
@@ -30,8 +30,7 @@ def test_each_threshold_fails_on_its_own():
     cases = {
         "up_direction_verified": {"up_verdict": {"decidable": True, "inverted": True}},
         "scene_plumb_under_2deg": {"plumb": {"tilt_deg": 2.1}},
-        "witnesses_agree_under_0p5deg": {"walk": GOOD["walk"] | {"mesh_agreement_deg": 0.6}},
-        "floor_at_origin_under_5cm": {"floor_registration": {"median_abs_m": 0.06}},
+        "floor_at_origin_under_5cm": {"floor_registration": {"median_abs_m": 0.06, "walkable_fraction": 0.6}},
         "alignment_residual_under_25cm": {"layer_residual": {"median_m": 0.3}},
         "walkable_area_over_5m2": {"walkable_area_m2": 4.0},
         "no_collision_leak": {"physics": GOOD["physics"] | {"leak_rate": 0.025}},
@@ -41,6 +40,17 @@ def test_each_threshold_fails_on_its_own():
     for key, change in cases.items():
         qa = evaluate_gate(**GOOD | change)
         assert not qa["passed"] and [k for k, v in qa["checks"].items() if not v] == [key], key
+
+
+def test_a_navmesh_that_misses_the_walk_fails_the_floor_check():
+    """A perfect height match over 5% of the cameras proves nothing about the other 95%."""
+    qa = evaluate_gate(**GOOD | {"floor_registration": {"median_abs_m": 0.001, "walkable_fraction": 0.05}})
+    assert [k for k, v in qa["checks"].items() if not v] == ["floor_at_origin_under_5cm"]
+
+
+def test_the_pole_witness_is_recorded_but_not_gated():
+    qa = evaluate_gate(**GOOD | {"walk": GOOD["walk"] | {"mesh_agreement_deg": 1.1}})
+    assert qa["passed"] and qa["measurements"]["witness_disagreement_deg"] == 1.1
 
 
 def test_missing_evidence_fails_closed():

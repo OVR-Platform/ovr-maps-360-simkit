@@ -176,12 +176,13 @@ def build_scene(
         f"plumb {plumb['tilt_deg']:.3f} deg against the {plumb['reference']}")
 
     # The navmesh reads the full-resolution crop; the collision proxy reads a
-    # simplified one. Walkability is decided per cell from vertex density, so
-    # decimating first would empty the grid.
+    # simplified one. Walkability is decided per cell from samples spread over
+    # the triangles' surface, so the grid is as dense as the cells ask, not as
+    # dense as the mesh happens to be.
     if cell_size is None:
         cell_size = cell_size_for(mesh)
-        log(f"S5 cell size {cell_size:.2f} m, from the mesh's vertex density")
-    navmesh = build_navmesh(mesh, cell_size=cell_size)
+        log(f"S5 cell size {cell_size:.2f} m (a foot); surface sampled per cell")
+    navmesh = build_navmesh(mesh, cell_size=cell_size, seed_points=frame.ground_points[:, :2])
 
     if simplify_to and len(mesh.triangles) > simplify_to:
         mesh = mesh.simplify_quadric_decimation(target_number_of_triangles=simplify_to)

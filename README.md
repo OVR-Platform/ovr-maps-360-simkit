@@ -114,26 +114,35 @@ vertical is the walls, and that is what the gate checks.
 
 ## The gate
 
-A bundle ships as tier **T1a** only if all nine checks pass. Thresholds are
+A bundle ships as tier **T1a** only if all eight checks pass. Thresholds are
 part of the contract and are not relaxed to make a scene pass.
 
 | # | check | measured as | threshold |
 |---|---|---|---|
 | 1 | `up_direction_verified` | the densest horizontal slab of the splat within 3 m of the walk sits in the lower part of the walked height, and ≥ 90% of camera centres have ground beneath them | decidable, not inverted |
 | 2 | `scene_plumb_under_2deg` | vertical implied by the walls, from the splat's disc Gaussians and from the mesh faces, against the frame's +Z; the tilt is the **smaller** of the two witnesses, since a broken alignment tilts the walls in both reconstructions | < 2° |
-| 3 | `witnesses_agree_under_0p5deg` | plane of the walked trajectory against the plane of the ground ray-cast beneath it | < 0.5° |
-| 4 | `floor_at_origin_under_5cm` | under every camera on a walkable cell, navmesh ground height against the ray-cast floor: median absolute difference | < 5 cm |
-| 5 | `alignment_residual_under_25cm` | median distance from the splat's solid Gaussians (opacity > 0.5) to the collision surface, within 12 m of the walk | < 25 cm |
-| 6 | `walkable_area_over_5m2` | navmesh area after the stance step filter and splat obstacles | ≥ 5 m² |
-| 7 | `no_collision_leak` | foot-sized damped plates dropped on 40 navmesh cells in MuJoCo: none falls through | 0% |
-| 8 | `probes_settle` | plates at rest within 3 s | ≥ 90% |
-| 9 | `penetration_p95_under_2cm` | solver contact penetration, 95th percentile | < 2 cm |
+| 3 | `floor_at_origin_under_5cm` | under every camera on a walkable cell, navmesh ground height against the ray-cast floor: median absolute difference, and the navmesh must cover at least 20% of the cameras | < 5 cm, >= 20% covered |
+| 4 | `alignment_residual_under_25cm` | median distance from the splat's solid Gaussians (opacity > 0.5) to the collision surface, within 12 m of the walk | < 25 cm |
+| 5 | `walkable_area_over_5m2` | navmesh area after the stance step filter and splat obstacles | ≥ 5 m² |
+| 6 | `no_collision_leak` | foot-sized damped plates dropped on 40 navmesh cells in MuJoCo: none falls through | 0% |
+| 7 | `probes_settle` | plates at rest within 3 s | ≥ 90% |
+| 8 | `penetration_p95_under_2cm` | solver contact penetration, 95th percentile | < 2 cm |
 
-Why the thresholds of checks 2 and 3 are where they are: over the 50 scenes of
-the sample, the two wall witnesses disagree with each other by 0.9° median
-(1.9° p90), so 2° is where a real alignment error stands out from witness
-noise, and 2° of gravity error is a 3.5% slope under a robot's feet. The walk
-and ground planes agree to 0.07° median (0.29° p90).
+Why the threshold of check 2 is where it is: over the 50 scenes of the sample,
+the two wall witnesses disagree with each other by 0.9° median (1.9° p90), so
+2° is where a real alignment error stands out from witness noise, and 2° of
+gravity error is a 3.5% slope under a robot's feet.
+
+The angle between the plane of the camera trajectory and the plane of the
+ground beneath it is recorded (`witness_disagreement_deg`) but no longer
+gated: it tilts with the pole, not with the scene (45 cm of pole travel over a
+100 m walk is 0.3–1°), and every scene it rejected had its navmesh ground
+within 1 mm of the ray-cast floor.
+
+The walkable grid samples the *surface* of every triangle (ten samples per
+cell of area, at least one per triangle), so a floor of four large panels is
+read exactly like a floor of a million small ones; the cell is a foot,
+0.25 m.
 
 The camera's height above the floor is recorded (`camera_height_m`) but not
 gated: operators hold the pole at different heights, and sometimes lower it
