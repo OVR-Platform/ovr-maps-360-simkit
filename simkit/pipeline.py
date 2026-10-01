@@ -84,7 +84,8 @@ def build_scene(
     from simkit.frame360 import scene_frame
     from simkit.gate import evaluate_gate, floor_registration, layer_residual, plumb_measurement
     from simkit.geometry.collision import build_collision_proxy
-    from simkit.geometry.coverage_bounds import REACH_M, coverage_walls, mesh_witness, wall_boxes
+    from simkit.geometry.coverage_bounds import (REACH_M, boxed_cells, coverage_walls, mesh_witness, wall_boxes,
+                                                 wall_field)
     from simkit.geometry.navmesh import Navmesh, build_navmesh, cell_size_for
     from simkit.geometry.splat_obstacles import obstacle_boxes, obstacle_cells
     from simkit.geometry.up_check import splat_up_verdict
@@ -228,11 +229,17 @@ def build_scene(
     # nothing would stop a drifting robot from walking onto it. Each wall is as
     # tall as what the mesh or the splat saw there (a sofa, a pane the mesh
     # lost), and the furniture past the fence gets boxes too.
-    wall_grid, heights = coverage_walls(navmesh, mesh_points, mesh_normals, solid_means)
-    coverage_walls = wall_boxes(navmesh, wall_grid, heights) if wall_grid.any() else []
+    wall_grid, tops, bottoms = coverage_walls(navmesh, mesh_points, mesh_normals, solid_means)
     del mesh_points, mesh_normals
-    stages["s5_coverage_walls"] = {"wall_cells": int(wall_grid.sum()), "boxes": len(coverage_walls)}
-    log(f"S5 coverage walls: {int(wall_grid.sum())} cells fenced, {len(coverage_walls)} boxes")
+    # Walls within the robot's reach are boxes, the rest one height field.
+    boxed = boxed_cells(navmesh, wall_grid, bottoms)
+    walls = wall_field(navmesh, wall_grid & ~boxed, tops)
+    walls_png = walls.write_png(layout.collision / "walls_hfield.png")
+    wall_box_list = wall_boxes(navmesh, boxed, tops, bottoms) if boxed.any() else []
+    stages["s5_coverage_walls"] = {"wall_cells": int(wall_grid.sum()), "boxed_cells": int(boxed.sum()),
+                                   "boxes": len(wall_box_list), "field": walls.as_dict()}
+    log(f"S5 coverage walls: {int(wall_grid.sum())} cells, {int(boxed.sum())} of them in "
+        f"{len(wall_box_list)} boxes, the rest one height field")
 
     if navmesh.area_m2 < 5.0:
         raise ValueError(f"degenerate scene: {navmesh.area_m2:.1f} m2 walkable after the step filter")
@@ -263,12 +270,16 @@ def build_scene(
     mjcf_path = write_mjcf(
         parts, layout.root / "scene.xml", scene_name=f"sre_{scene_id}",
         heightfield=heightfield, heightfield_png=heightfield_png,
-        extra_boxes=splat_boxes + coverage_walls,
+        wall_field=walls, wall_field_png=walls_png,
+        extra_boxes=splat_boxes + wall_box_list,
     )
     usd_path = export_usd_subprocess(
         parts, layout.root / "scene.usda", f"sre_{scene_id}",
-        ground_mesh=heightfield_to_mesh(heightfield, keep_mask=ndimage.binary_dilation(navmesh.grid, iterations=6)),
-        extra_boxes=splat_boxes + coverage_walls,
+        static_meshes={"ground": heightfield_to_mesh(
+            heightfield, keep_mask=ndimage.binary_dilation(navmesh.grid, iterations=6))} | (
+            {"walls": heightfield_to_mesh(walls, upsample=1, keep_mask=walls.elevation > 0)}
+            if (wall_grid & ~boxed).any() else {}),
+        extra_boxes=splat_boxes + wall_box_list,
     )
     stages["s6_export"] = {"mjcf": mjcf_path.name, "usd": usd_path.name}
 
