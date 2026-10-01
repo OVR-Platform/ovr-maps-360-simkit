@@ -32,6 +32,7 @@ def verify_scene_outputs(root: Path) -> list[str]:
         bundle / "manifest.json", bundle / "scene.xml", bundle / "scene.usda",
         bundle / "frame" / "transform.json", bundle / "photoreal" / "splat.ply",
         bundle / "collision" / "surface.ply", bundle / "collision" / "ground_hfield.png",
+        bundle / "collision" / "walls_hfield.png",
         bundle / "collision" / "navmesh_grid.npy", bundle / "collision" / "navmesh_ground_z.npy",
         certification / "mujoco_physics_gate.json", certification / "mujoco_physics_gate.txt",
         certification / "isaac_drop_test.json",

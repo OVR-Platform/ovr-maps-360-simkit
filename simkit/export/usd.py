@@ -33,14 +33,18 @@ def write_usd(
     collision_parts: list[Path],
     output_path: str | Path,
     *,
-    ground_mesh: tuple[np.ndarray, np.ndarray] | None = None,
+    static_meshes: dict[str, tuple[np.ndarray, np.ndarray]] | None = None,
     scene_name: str = "sre_scene",
     extra_boxes: list | None = None,
     static_friction: float = 1.0,
     dynamic_friction: float = 0.9,
     restitution: float = 0.0,
 ) -> Path:
-    """Write a USD stage with the static collision environment."""
+    """Write a USD stage with the static collision environment.
+
+    ``static_meshes`` are exact triangle-mesh colliders by prim name: the
+    ground, and the coverage walls that stand on it.
+    """
     from pxr import Gf, Usd, UsdGeom, UsdPhysics, UsdShade
 
     # PhysxSchema only exists inside the Isaac runtime, not in standalone
@@ -82,9 +86,8 @@ def write_usd(
     # field, and without this the bundle arrives in a USD engine with no floor —
     # which a MuJoCo-side gate cannot detect, because MuJoCo reads the height
     # field natively.
-    if ground_mesh is not None:
-        vertices, faces = ground_mesh
-        ground = UsdGeom.Mesh.Define(stage, f"/{scene_name}/Collision/ground")
+    for prim_name, (vertices, faces) in (static_meshes or {}).items():
+        ground = UsdGeom.Mesh.Define(stage, f"/{scene_name}/Collision/{prim_name}")
         ground.CreatePointsAttr([Gf.Vec3f(float(x), float(y), float(z)) for x, y, z in vertices])
         ground.CreateFaceVertexCountsAttr([3] * len(faces))
         ground.CreateFaceVertexIndicesAttr(faces.reshape(-1).tolist())
