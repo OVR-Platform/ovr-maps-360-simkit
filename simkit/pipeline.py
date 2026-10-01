@@ -84,8 +84,8 @@ def build_scene(
     from simkit.frame360 import scene_frame
     from simkit.gate import evaluate_gate, floor_registration, layer_residual, plumb_measurement
     from simkit.geometry.collision import build_collision_proxy
-    from simkit.geometry.coverage_bounds import uncovered_cells, wall_boxes
-    from simkit.geometry.navmesh import Navmesh, build_navmesh, cell_size_for
+    from simkit.geometry.coverage_bounds import uncovered_cells, wall_boxes, wall_heights
+    from simkit.geometry.navmesh import Navmesh, build_navmesh, cell_size_for, surface_samples
     from simkit.geometry.splat_obstacles import obstacle_boxes, obstacle_cells
     from simkit.geometry.up_check import splat_up_verdict
     from simkit.io.splat_io import load_splat
@@ -183,6 +183,8 @@ def build_scene(
         cell_size = cell_size_for(mesh)
         log(f"S5 cell size {cell_size:.2f} m (a foot); surface sampled per cell")
     navmesh = build_navmesh(mesh, cell_size=cell_size, seed_points=frame.ground_points[:, :2])
+    # The coverage walls are sized from the same full-resolution surface.
+    mesh_points, _ = surface_samples(np.asarray(mesh.vertices), np.asarray(mesh.triangles), cell_size)
 
     if simplify_to and len(mesh.triangles) > simplify_to:
         mesh = mesh.simplify_quadric_decimation(target_number_of_triangles=simplify_to)
@@ -206,7 +208,8 @@ def build_scene(
     # Obstacles the splat sees and the mesh lost (a car reconstructs as a smear
     # in the splat and near-nothing in the mesh): those cells leave the navmesh
     # and become box colliders.
-    blocked = obstacle_cells(navmesh, splat.solid(min_opacity=0.5).means)
+    solid_means = splat.solid(min_opacity=0.5).means
+    blocked = obstacle_cells(navmesh, solid_means)
     splat_boxes = []
     if blocked.any():
         splat_boxes = obstacle_boxes(navmesh, blocked)
@@ -215,9 +218,12 @@ def build_scene(
     stages["s5_splat_obstacles"] = {"blocked_cells": int(blocked.sum()), "boxes": len(splat_boxes)}
 
     # Containment: the height field fills ground past the mesh's coverage, and
-    # nothing would stop a drifting robot from walking onto it.
+    # nothing would stop a drifting robot from walking onto it. Each wall is as
+    # tall as what the mesh or the splat saw there (a sofa, a pane the mesh lost).
     wall_grid = uncovered_cells(navmesh)
-    coverage_walls = wall_boxes(navmesh, wall_grid) if wall_grid.any() else []
+    heights = wall_heights(navmesh, wall_grid, [(mesh_points, 1), (solid_means, 12)])
+    coverage_walls = wall_boxes(navmesh, wall_grid, heights) if wall_grid.any() else []
+    del mesh_points
     stages["s5_coverage_walls"] = {"wall_cells": int(wall_grid.sum()), "boxes": len(coverage_walls)}
     log(f"S5 coverage walls: {int(wall_grid.sum())} cells fenced, {len(coverage_walls)} boxes")
 

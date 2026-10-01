@@ -167,7 +167,10 @@ resting height is compared with the floor MuJoCo reported there
   under a whole stance, and the largest connected region kept. Cells where the
   splat sees a solid obstacle the mesh lost (typically a car) are removed and
   get box colliders. Uncovered ground at the navmesh edge is fenced with wall
-  boxes, so a drifting robot cannot walk onto invented height field.
+  boxes, so a drifting robot cannot walk onto invented height field. Each
+  wall cell is as tall as the tallest thing the mesh or the splat (glass the
+  mesh lost) saw in it, a sofa at its seat, and 1.6 m where neither saw
+  anything above the 0.25 m climbable step.
   Being 2.5D, it cannot represent a walk that passes over another level: the
   lower level wins, and such scenes fail check 4.
 - The **ground** is a height field (MJCF `hfield`, USD mesh); the structure
