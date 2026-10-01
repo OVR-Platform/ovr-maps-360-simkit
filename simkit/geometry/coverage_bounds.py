@@ -17,13 +17,12 @@ spawn cell.
 A wall cell is not always unobserved. The navmesh drops every cell outside the
 walked region, so a sofa (its seat is ground 0.42 m above the floor, out of
 step reach) and a glass partition read as uncovered exactly like a gap in the
-scan. Each wall cell therefore stands as tall as the tallest thing the mesh or
-the splat saw in it, and full height only where neither saw anything: on the
-office scene 4b14390a the sofa went from a 1.6 m wall to 0.42-0.50 m, against
-0.35-0.45 m of mesh under it. The
-splat is the second witness because the mesh loses glass (OpenMVS leaves holes
-in frosted panes where the splat still carries them as solid gaussians), and a
-fence sized from the mesh alone would open those holes.
+scan. Each wall cell therefore stands as tall as what the mesh saw in it, and
+full height where the mesh saw nothing (``wall_heights``): on the office scene
+4b14390a the sofa went from a 1.6 m wall to 0.31-0.49 m, against 0.30-0.46 m
+of mesh under it. The splat raises walls where the mesh lost glass (OpenMVS
+leaves holes in frosted panes the splat still carries as solid gaussians) and
+never lowers one.
 """
 
 from __future__ import annotations
@@ -79,53 +78,82 @@ def _filled_ground(navmesh) -> np.ndarray:
     return ground[tuple(indices)]
 
 
-def wall_heights(navmesh, wall_cells: np.ndarray, witnesses, *, height_m: float = 1.6,
-                 climbable_m: float = 0.25) -> np.ndarray:
+def _cell_counts(navmesh, wall_cells, base, points, low, high):
+    """Per wall cell: how many of ``points`` stand between ``low`` and ``high``
+    above the cell's ground, and the highest of them."""
+    rows_n, cols_n = wall_cells.shape
+    counts = np.zeros(wall_cells.shape, dtype=np.int64)
+    highest = np.full(wall_cells.shape, -np.inf)
+    points = np.asarray(points, dtype=np.float64).reshape(-1, 3)
+    cols = np.floor((points[:, 0] - navmesh.origin[0]) / navmesh.cell_size).astype(np.int64)
+    rows = np.floor((points[:, 1] - navmesh.origin[1]) / navmesh.cell_size).astype(np.int64)
+    inside = (rows >= 0) & (rows < rows_n) & (cols >= 0) & (cols < cols_n)
+    rows, cols, z = rows[inside], cols[inside], points[inside, 2]
+    relative = z - base[rows, cols]
+    chosen = wall_cells[rows, cols] & (relative > low) & (relative < high)
+    np.add.at(counts, (rows[chosen], cols[chosen]), 1)
+    np.maximum.at(highest, (rows[chosen], cols[chosen]), relative[chosen])
+    return counts, highest
+
+
+def mesh_witness(mesh, cell_size: float) -> tuple[np.ndarray, np.ndarray]:
+    """Surface samples and normals of the mesh's structure, for ``wall_heights``.
+
+    Connected components under ``MIN_COMPONENT_TRIANGLES`` (the LODs' debris
+    threshold) are left out: a stray OpenMVS triangle at seat height must not
+    size a wall down. What remains is sampled as the navmesh samples it, so a
+    single sample in a cell is real surface there.
+    """
+    from simkit.geometry.navmesh import surface_samples
+    from simkit.lod import MIN_COMPONENT_TRIANGLES
+
+    clusters, sizes, _ = mesh.cluster_connected_triangles()
+    keep = np.asarray(sizes)[np.asarray(clusters)] >= MIN_COMPONENT_TRIANGLES
+    return surface_samples(np.asarray(mesh.vertices), np.asarray(mesh.triangles)[keep], cell_size)
+
+
+def wall_heights(navmesh, wall_cells: np.ndarray, mesh_points: np.ndarray, mesh_normals: np.ndarray,
+                 splat_points: np.ndarray, *, height_m: float = 1.6, climbable_m: float = 0.25,
+                 min_points: int = 12, flat_normal: float = 0.85) -> np.ndarray:
     """Height of the wall over each wall cell (0 elsewhere).
 
-    ``witnesses`` are ``(points, min_points)`` pairs, points in the simulation
-    frame. A witness sees a cell when at least ``min_points`` of its points
-    stand between ``climbable_m`` and ``height_m`` above the cell's ground; the
-    wall then reaches the highest of them. The cell takes the tallest witness,
-    and ``height_m`` when no witness sees it.
+    Two witnesses, the mesh structure (``mesh_witness``) and the solid splat
+    means. A witness sees a cell when its points stand between ``climbable_m``
+    and ``height_m`` above the cell's ground (one mesh sample, or
+    ``min_points`` gaussians), and its height there is the highest of them.
+    Where the mesh sees the cell the wall takes the taller witness; elsewhere
+    it keeps ``height_m``. The splat only ever raises a wall (a pane the mesh
+    lost), it never lowers one: a cell the mesh has no surface in is a hole in
+    the mesh, whatever the splat holds.
+
+    A cell keeps ``height_m`` also when the mesh has ``min_points`` samples of
+    non-horizontal surface above ``height_m`` in it (``|n_z| < flat_normal``,
+    the navmesh's own test for ground): a wall whose middle the mesh lost (a
+    pane, a blank wall) still has its top, and a skirting under a missing pane
+    must not size the wall down to the skirting. Horizontal surface up there is a ceiling and says
+    nothing about the cell.
 
     ``climbable_m`` is the step the navmesh lets a robot climb
     (``build_navmesh``, ``max_step_m``). Anything lower would not contain the
     robot: past the wall the height field is the nearest-neighbour fill, not
     observed ground, so a kerb-height wall would let it step onto guesswork.
-    Such cells keep the full wall.
-
-    ``min_points`` is 1 for mesh surface samples (``surface_samples`` puts at
-    least one on every triangle, so a sample is surface the mesh has) and 12
-    for solid splat means, the splat obstacles' floater guard
-    (``obstacle_cells``): a dozen is structure, a couple are noise, and noise
-    must not size a wall down.
+    Such cells keep the full wall. ``min_points`` is the splat obstacles'
+    floater guard (``obstacle_cells``): a dozen points is structure, a couple
+    are noise (a tilted facet in a ceiling, a floater).
     """
     base = _filled_ground(navmesh)
-    rows_n, cols_n = wall_cells.shape
-    top = np.full(wall_cells.shape, -np.inf)
-    for points, min_points in witnesses:
-        points = np.asarray(points, dtype=np.float64)
-        if len(points) == 0:
-            continue
-        cols = np.floor((points[:, 0] - navmesh.origin[0]) / navmesh.cell_size).astype(np.int64)
-        rows = np.floor((points[:, 1] - navmesh.origin[1]) / navmesh.cell_size).astype(np.int64)
-        inside = (rows >= 0) & (rows < rows_n) & (cols >= 0) & (cols < cols_n)
-        rows, cols, z = rows[inside], cols[inside], points[inside, 2]
-        relative = z - base[rows, cols]
-        band = wall_cells[rows, cols] & (relative > climbable_m) & (relative < height_m)
-        rows, cols, relative = rows[band], cols[band], relative[band]
-        counts = np.zeros(wall_cells.shape, dtype=np.int64)
-        np.add.at(counts, (rows, cols), 1)
-        highest = np.full(wall_cells.shape, -np.inf)
-        np.maximum.at(highest, (rows, cols), relative)
-        top = np.maximum(top, np.where(counts >= min_points, highest, -np.inf))
-    heights = np.where(np.isfinite(top), top, height_m)
-    return np.where(wall_cells, heights, 0.0)
+    _, mesh_top = _cell_counts(navmesh, wall_cells, base, mesh_points, climbable_m, height_m)
+    counts, splat_top = _cell_counts(navmesh, wall_cells, base, splat_points, climbable_m, height_m)
+    splat_top = np.where(counts >= min_points, splat_top, -np.inf)
+    top = np.where(np.isfinite(mesh_top), np.maximum(mesh_top, splat_top), -np.inf)
+    vertical = np.abs(np.asarray(mesh_normals).reshape(-1, 3)[:, 2]) < flat_normal
+    above, _ = _cell_counts(navmesh, wall_cells, base, np.asarray(mesh_points).reshape(-1, 3)[vertical],
+                            height_m, np.inf)
+    top[above >= min_points] = height_m
+    return np.where(wall_cells, np.where(np.isfinite(top), top, height_m), 0.0)
 
 
-def wall_boxes(navmesh, wall_cells: np.ndarray, heights: np.ndarray, *,
-               height_m: float = 1.6, height_step_m: float = 0.06):
+def wall_boxes(navmesh, wall_cells: np.ndarray, heights: np.ndarray, *, step_m: float = 0.06):
     """Collision boxes tiling the wall cells exactly.
 
     Not the cluster-AABB merge used for splat obstacles: the axis-aligned box
@@ -135,18 +163,20 @@ def wall_boxes(navmesh, wall_cells: np.ndarray, heights: np.ndarray, *,
     out is a hole in the fence. (A cap of 1500 boxes used to drop the rest,
     and 40 of the 50 sample scenes hit it.)
 
-    ``heights`` (per cell, from ``wall_heights``) are rounded up to ``height_step_m`` and a box only joins cells of
-    one rounded height, so a wall is never shorter than what was seen and at
-    most 6 cm taller (never above ``height_m``): the step that
-    ``filter_navmesh_by_step`` treats as flat ground under a stance.
+    ``heights`` (per cell, from ``wall_heights``) are measured from each
+    cell's ground. A box joins cells whose wall top, rounded up to ``step_m``,
+    is the same, and stands from the lowest ground under it to that top: no
+    cell's wall comes out shorter than measured, or more than ``step_m``
+    taller, on a slope too. ``step_m`` trades box count against over-height;
+    6 cm is the step a stance already treats as flat
+    (``filter_navmesh_by_step``).
 
     Wall cells have no observed ground by definition, so bases come from the
     nearest observed ground: the same fill the height field itself uses, which
     keeps each wall footed on the terrain it stands on.
     """
     filled = _filled_ground(navmesh)
-    level = np.ceil(np.round(heights / height_step_m, 6)).astype(np.int64)
-    rounded = np.minimum(level * height_step_m, height_m)
+    level = np.ceil(np.round((filled + heights) / step_m, 6)).astype(np.int64)
 
     remaining = wall_cells.copy()
     rows_n, cols_n = remaining.shape
@@ -167,8 +197,7 @@ def wall_boxes(navmesh, wall_cells: np.ndarray, heights: np.ndarray, *,
                 bottom += 1
             remaining[row : bottom + 1, col : end + 1] = False
             base = float(filled[row : bottom + 1, col : end + 1].min())
-            top = float((filled[row : bottom + 1, col : end + 1]
-                         + rounded[row, col]).max())
+            top = float(here * step_m)
             centre = navmesh.origin + np.array(
                 [(col + end + 1) / 2, (row + bottom + 1) / 2]
             ) * navmesh.cell_size
