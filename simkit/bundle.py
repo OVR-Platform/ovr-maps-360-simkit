@@ -87,7 +87,7 @@ def export_usd_subprocess(
     collision_parts: list[Path],
     output_path: Path,
     scene_name: str,
-    static_meshes: dict | None = None,
+    ground_mesh: tuple | None = None,
     extra_boxes: list | None = None,
 ) -> Path:
     """Run the USD export in a fresh interpreter.
@@ -106,9 +106,9 @@ def export_usd_subprocess(
         "boxes": extra_boxes or [],
     }))
 
-    mesh_paths = {name: output_path.with_suffix(f".{name}.npz") for name in (static_meshes or {})}
-    for name, (vertices, faces) in (static_meshes or {}).items():
-        np.savez(mesh_paths[name], vertices=vertices, faces=faces)
+    ground_path = output_path.with_suffix(".ground.npz")
+    if ground_mesh is not None:
+        np.savez(ground_path, vertices=ground_mesh[0], faces=ground_mesh[1])
 
     script = (
         "import sys, json, numpy as np; sys.path.insert(0, %r)\n"
@@ -116,12 +116,15 @@ def export_usd_subprocess(
         "from simkit.export.usd import write_usd\n"
         "payload = json.loads(Path(%r).read_text())\n"
         "parts = [Path(p) for p in payload['parts']]\n"
-        "meshes = {n: tuple(np.load(p)[k] for k in ('vertices', 'faces')) for n, p in %r.items()}\n"
-        "write_usd(parts, %r, static_meshes=meshes, scene_name=%r, extra_boxes=payload['boxes'])\n"
+        "gp = Path(%r)\n"
+        "ground = None\n"
+        "if gp.exists():\n"
+        "    d = np.load(gp); ground = (d['vertices'], d['faces'])\n"
+        "write_usd(parts, %r, ground_mesh=ground, scene_name=%r, extra_boxes=payload['boxes'])\n"
     ) % (
         str(Path(__file__).resolve().parents[1]),
         str(listing),
-        {name: str(path) for name, path in mesh_paths.items()},
+        str(ground_path),
         str(output_path),
         scene_name,
     )
@@ -134,6 +137,5 @@ def export_usd_subprocess(
             raise RuntimeError(f"USD export subprocess failed:\n{result.stderr[-2000:]}")
     finally:
         listing.unlink(missing_ok=True)
-        for path in mesh_paths.values():
-            path.unlink(missing_ok=True)
+        ground_path.unlink(missing_ok=True)
     return output_path

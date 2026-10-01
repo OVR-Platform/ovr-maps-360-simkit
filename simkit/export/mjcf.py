@@ -22,8 +22,6 @@ def write_mjcf(
     include_ground_plane: bool = False,
     heightfield=None,
     heightfield_png: Path | None = None,
-    wall_field=None,
-    wall_field_png: Path | None = None,
 ) -> Path:
     """Write an MJCF describing the static environment.
 
@@ -35,9 +33,6 @@ def write_mjcf(
     ``include_ground_plane`` adds an infinite plane at z = 0. Off by default: the
     point of these bundles is that the real floor comes from the capture, and a
     helper plane would mask exactly the collision leaks the gate looks for.
-
-    ``wall_field`` is the coverage walls that stand on the ground
-    (``coverage_bounds.wall_field``), a second height field.
     """
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -47,16 +42,16 @@ def write_mjcf(
     ET.SubElement(root, "option", timestep="0.002", integrator="implicitfast")
 
     asset = ET.SubElement(root, "asset")
-    fields = [(name, field, png) for name, field, png in
-              (("ground", heightfield, heightfield_png), ("walls", wall_field, wall_field_png))
-              if field is not None and png is not None]
-    for name, field, png in fields:
+    if heightfield is not None and heightfield_png is not None:
         ET.SubElement(
             asset,
             "hfield",
-            name=name,
-            file=str(Path(png).resolve().relative_to(output_path.parent.resolve())),
-            size=f"{field.radius_x:.4f} {field.radius_y:.4f} {field.elevation_z:.4f} {field.base_z:.4f}",
+            name="ground",
+            file=str(Path(heightfield_png).resolve().relative_to(output_path.parent.resolve())),
+            size=(
+                f"{heightfield.radius_x:.4f} {heightfield.radius_y:.4f} "
+                f"{heightfield.elevation_z:.4f} {heightfield.base_z:.4f}"
+            ),
         )
     for index, part in enumerate(collision_parts):
         relative = Path(part).resolve().relative_to(output_path.parent.resolve())
@@ -92,15 +87,15 @@ def write_mjcf(
         dir="0 0 -1",
         directional="true",
     )
-    for name, field, _ in fields:
+    if heightfield is not None and heightfield_png is not None:
         # MuJoCo places elevation 0 at the geom origin, so lift it to world Z.
         ET.SubElement(
             worldbody,
             "geom",
-            name=f"{name}_hfield",
+            name="ground_hfield",
             type="hfield",
-            hfield=name,
-            pos=f"{field.centre[0]:.4f} {field.centre[1]:.4f} {field.z_offset:.4f}",
+            hfield="ground",
+            pos=f"{heightfield.centre[0]:.4f} {heightfield.centre[1]:.4f} {heightfield.z_offset:.4f}",
             friction=" ".join(str(f) for f in friction),
             contype="1",
             conaffinity="1",

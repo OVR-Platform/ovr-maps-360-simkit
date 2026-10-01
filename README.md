@@ -42,7 +42,6 @@ How those were made, because it decides what the frame is:
       collision/
         surface.ply                  the collision surface: mesh cropped to the walk, simplified
         ground_hfield.png            ground height field (16-bit)
-        walls_hfield.png             coverage walls on the ground, as a second height field
         navmesh_grid.npy             walkable cells (bool, rows = y, cols = x)
         navmesh_ground_z.npy         ground height per cell (float, NaN off the navmesh)
         part_NNN.obj                 convex parts (CoACD) for structure above the ground
@@ -167,18 +166,8 @@ resting height is compared with the floor MuJoCo reported there
   1.6 m of head clearance, a 0.25 m step limit between cells, a 6 cm limit
   under a whole stance, and the largest connected region kept. Cells where the
   splat sees a solid obstacle the mesh lost (typically a car) are removed and
-  get box colliders. Uncovered ground at the navmesh edge is fenced with
-  walls, so a drifting robot cannot walk onto invented height field. Each
-  wall cell is as tall as what the mesh saw in it above the highest walkable
-  ground next to it (a sofa at its seat), raised by the splat where the mesh
-  lost glass, and 1.6 m where the mesh saw nothing above the 0.25 m step the
-  navmesh climbs (a Go2 climbs 16 cm) or has wall just above 1.6 m. Past the
-  fence, what the mesh sees within 3 m of walkable ground (the rest of a
-  sofa, its backrest) gets a wall by the same rule; pockets under 1 m2 inside
-  the walkable area stay open. A wall stands from the lowest structure in its
-  cell when the Go2 (0.40 m) fits under it over observed floor. Walls within
-  the Go2's reach of walkable ground are boxes, the rest a second height
-  field (`walls_hfield.png`).
+  get box colliders. Uncovered ground at the navmesh edge is fenced with wall
+  boxes, so a drifting robot cannot walk onto invented height field.
   Being 2.5D, it cannot represent a walk that passes over another level: the
   lower level wins, and such scenes fail check 4.
 - The **ground** is a height field (MJCF `hfield`, USD mesh); the structure
