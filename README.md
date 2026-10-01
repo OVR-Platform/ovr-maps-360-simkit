@@ -170,7 +170,9 @@ resting height is compared with the floor MuJoCo reported there
   boxes, so a drifting robot cannot walk onto invented height field. Each
   wall cell is as tall as what the mesh saw in it (a sofa at its seat), raised
   by the splat where the mesh lost glass, and 1.6 m where the mesh saw nothing
-  above the 0.25 m climbable step or has wall above 1.6 m.
+  above the 0.25 m climbable step or has wall above 1.6 m. Past the fence,
+  what the mesh sees within 3 m of walkable ground (the rest of a sofa, its
+  backrest) gets boxes by the same rule.
   Being 2.5D, it cannot represent a walk that passes over another level: the
   lower level wins, and such scenes fail check 4.
 - The **ground** is a height field (MJCF `hfield`, USD mesh); the structure

@@ -9,7 +9,8 @@ collision boxes that come out, measured from the ground under each cell.
 import numpy as np
 import pytest
 
-from simkit.geometry.coverage_bounds import mesh_witness, uncovered_cells, wall_boxes, wall_heights
+from simkit.geometry.coverage_bounds import coverage_walls, mesh_witness, uncovered_cells, wall_boxes
+from simkit.geometry.splat_obstacles import obstacle_boxes
 from simkit.geometry.navmesh import Navmesh
 
 CELL = 0.25
@@ -47,10 +48,16 @@ def _side(points):
 
 def _walls(mesh=NONE, splat=NONE, normals=None, ground=_ground):
     navmesh = _navmesh(ground)
-    cells = uncovered_cells(navmesh)
-    assert cells[:, 8:10].all() and not cells[:, 10:].any()
+    fence = uncovered_cells(navmesh)
+    assert fence[:, 8:10].all() and not fence[:, 10:].any()
     normals = _side(mesh) if normals is None else normals
-    return wall_boxes(navmesh, cells, wall_heights(navmesh, cells, mesh, normals, splat))
+    cells, heights = coverage_walls(navmesh, mesh, normals, splat)
+    return wall_boxes(navmesh, cells, heights)
+
+
+def _boxes_over(boxes, x, y):
+    return [b for b in boxes
+            if abs(x - b["centre"][0]) < b["half_extents"][0] and abs(y - b["centre"][1]) < b["half_extents"][1]]
 
 
 def _height_at(boxes, x, y, ground=_ground):
@@ -70,6 +77,23 @@ def test_unobserved_strip_keeps_a_full_wall():
     for x in WALL_X:
         for y in np.arange(0, 4, CELL) + CELL / 2:
             _assert_full(boxes, x, y)
+
+
+def test_nothing_seen_past_the_fence_gets_no_box():
+    boxes = _walls(_block(2.0, 4.0, 0.0, 4.0, top=0.0))  # floor only
+    assert not _boxes_over(boxes, 2.875, 1.0) and not _boxes_over(boxes, 3.625, 1.0)
+
+
+def test_the_whole_sofa_is_in_collision_seat_and_backrest_past_the_fence():
+    """A sofa 1 m deep (seat 0.42 m) with a 0.86 m backrest at its far end:
+    only its front half lies in the fence ring."""
+    seat = _block(2.0, 3.0, 0.0, 2.0, top=0.42)
+    back = _block(3.0, 3.25, 0.0, 2.0, top=0.86)
+    boxes = _walls(np.vstack([seat, back]))
+    for x in (2.125, 2.625, 2.875):  # seat, inside the ring and past it
+        assert 0.42 <= _height_at(boxes, x, 1.0) <= 0.42 + STEP
+    assert 0.86 <= _height_at(boxes, 3.125, 1.0) <= 0.86 + STEP  # backrest
+    assert not _boxes_over(boxes, 3.625, 1.0)  # floor behind the sofa
 
 
 def test_low_furniture_gets_its_own_height_and_the_wall_beside_it_stays_full():
@@ -184,3 +208,20 @@ def test_the_splat_alone_never_lowers_a_wall():
     """A hole in the mesh where the splat holds something low stays a full wall."""
     blob = _block(2.0, 2.5, 0.0, 4.0, top=0.6, step=0.04)
     _assert_full(_walls(splat=blob), 2.125, 1.0)
+
+
+def test_every_splat_obstacle_cluster_gets_a_box():
+    """More than the 150 clusters the old cap kept."""
+    size = 100
+    grid = np.ones((size, size), dtype=bool)
+    navmesh = Navmesh(grid, np.zeros((size, size)), np.zeros(2), CELL)
+    blocked = np.zeros((size, size), dtype=bool)
+    blocked[::4, ::4] = True  # 625 single-cell clusters
+    assert len(obstacle_boxes(navmesh, blocked)) == int(blocked.sum())
+
+
+def test_walkable_ground_never_gets_a_box():
+    """A wall face hanging above walkable floor (a soffit from 1.8 m up)."""
+    soffit = _block(0.9, 1.1, 0.0, 4.0, top=2.6)
+    soffit = soffit[soffit[:, 2] > 1.8]
+    assert not _boxes_over(_walls(soffit), 1.0, 1.0)

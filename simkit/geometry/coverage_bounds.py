@@ -22,12 +22,18 @@ full height where the mesh saw nothing (``wall_heights``): on the office scene
 4b14390a the sofa went from a 1.6 m wall to 0.31-0.49 m, against 0.30-0.46 m
 of mesh under it. The splat raises walls where the mesh lost glass (OpenMVS
 leaves holes in frosted panes the splat still carries as solid gaussians) and
-never lowers one.
+never lowers one. Past the fence, the structure the mesh sees within reach
+(the rest of the sofa, its backrest) gets boxes by the same rule
+(``coverage_walls``).
 """
 
 from __future__ import annotations
 
 import numpy as np
+
+# How far past walkable ground structure gets collision: the reach
+# ``above_ground_mesh`` gives the convex structure (3 m).
+REACH_M = 3.0
 
 
 def uncovered_cells(navmesh, *, margin_m: float = 0.45, min_hole_m2: float = 1.0) -> np.ndarray:
@@ -112,45 +118,75 @@ def mesh_witness(mesh, cell_size: float) -> tuple[np.ndarray, np.ndarray]:
     return surface_samples(np.asarray(mesh.vertices), np.asarray(mesh.triangles)[keep], cell_size)
 
 
-def wall_heights(navmesh, wall_cells: np.ndarray, mesh_points: np.ndarray, mesh_normals: np.ndarray,
+def wall_heights(navmesh, cells: np.ndarray, mesh_points: np.ndarray, mesh_normals: np.ndarray,
                  splat_points: np.ndarray, *, height_m: float = 1.6, climbable_m: float = 0.25,
                  min_points: int = 12, flat_normal: float = 0.85) -> np.ndarray:
-    """Height of the wall over each wall cell (0 elsewhere).
+    """Height of the structure the mesh sees over each of ``cells``, NaN where
+    it sees none (and outside ``cells``).
 
     Two witnesses, the mesh structure (``mesh_witness``) and the solid splat
     means. A witness sees a cell when its points stand between ``climbable_m``
     and ``height_m`` above the cell's ground (one mesh sample, or
     ``min_points`` gaussians), and its height there is the highest of them.
-    Where the mesh sees the cell the wall takes the taller witness; elsewhere
-    it keeps ``height_m``. The splat only ever raises a wall (a pane the mesh
-    lost), it never lowers one: a cell the mesh has no surface in is a hole in
-    the mesh, whatever the splat holds.
+    Where the mesh sees the cell it takes the taller witness. The splat only
+    ever raises a wall (a pane the mesh lost), it never makes one: a cell the
+    mesh has no surface in is a hole in the mesh, whatever the splat holds.
 
-    A cell keeps ``height_m`` also when the mesh has ``min_points`` samples of
-    non-horizontal surface above ``height_m`` in it (``|n_z| < flat_normal``,
-    the navmesh's own test for ground): a wall whose middle the mesh lost (a
-    pane, a blank wall) still has its top, and a skirting under a missing pane
-    must not size the wall down to the skirting. Horizontal surface up there is a ceiling and says
-    nothing about the cell.
+    A cell is ``height_m`` tall also when the mesh has ``min_points`` samples
+    of non-horizontal surface above ``height_m`` in it (``|n_z| <
+    flat_normal``, the navmesh's own test for ground): a wall whose middle the
+    mesh lost (a pane, a blank wall) still has its top, and a skirting under a
+    missing pane must not size the wall down to the skirting. Horizontal
+    surface up there is a ceiling and says nothing about the cell.
 
     ``climbable_m`` is the step the navmesh lets a robot climb
-    (``build_navmesh``, ``max_step_m``). Anything lower would not contain the
-    robot: past the wall the height field is the nearest-neighbour fill, not
-    observed ground, so a kerb-height wall would let it step onto guesswork.
-    Such cells keep the full wall. ``min_points`` is the splat obstacles'
-    floater guard (``obstacle_cells``): a dozen points is structure, a couple
-    are noise (a tilted facet in a ceiling, a floater).
+    (``build_navmesh``, ``max_step_m``): lower than that is floor to a robot,
+    not an obstacle, and would not contain it. ``min_points`` is the splat
+    obstacles' floater guard (``obstacle_cells``): a dozen points is
+    structure, a couple are noise (a tilted facet in a ceiling, a floater).
     """
     base = _filled_ground(navmesh)
-    _, mesh_top = _cell_counts(navmesh, wall_cells, base, mesh_points, climbable_m, height_m)
-    counts, splat_top = _cell_counts(navmesh, wall_cells, base, splat_points, climbable_m, height_m)
+    _, mesh_top = _cell_counts(navmesh, cells, base, mesh_points, climbable_m, height_m)
+    counts, splat_top = _cell_counts(navmesh, cells, base, splat_points, climbable_m, height_m)
     splat_top = np.where(counts >= min_points, splat_top, -np.inf)
     top = np.where(np.isfinite(mesh_top), np.maximum(mesh_top, splat_top), -np.inf)
     vertical = np.abs(np.asarray(mesh_normals).reshape(-1, 3)[:, 2]) < flat_normal
-    above, _ = _cell_counts(navmesh, wall_cells, base, np.asarray(mesh_points).reshape(-1, 3)[vertical],
+    above, _ = _cell_counts(navmesh, cells, base, np.asarray(mesh_points).reshape(-1, 3)[vertical],
                             height_m, np.inf)
     top[above >= min_points] = height_m
-    return np.where(wall_cells, np.where(np.isfinite(top), top, height_m), 0.0)
+    return np.where(cells & np.isfinite(top), top, np.nan)
+
+
+def coverage_walls(navmesh, mesh_points: np.ndarray, mesh_normals: np.ndarray, splat_points: np.ndarray,
+                   *, reach_m: float = REACH_M, height_m: float = 1.6) -> tuple[np.ndarray, np.ndarray]:
+    """The cells that get a box, and the height of each.
+
+    Two kinds, one rule for their height (``wall_heights``):
+
+    - the fence (``uncovered_cells``): uncovered cells next to the walkable
+      area. Where the mesh sees nothing it stands ``height_m`` tall, because
+      past it the terrain is guesswork;
+    - furniture and walls further in: every other uncovered cell within
+      ``reach_m`` of the walkable area where the mesh sees structure. Without
+      these the inside of a sofa (seat, backrest) had no collision at all: the
+      height field fills it with the floor beside it, and the convex parts of
+      anything standing on the floor are dropped (``build_collision_proxy``,
+      ``_ground_clearance``).
+
+    The seat stays out of the height field on purpose. MuJoCo interpolates a
+    height field between neighbouring samples, so a 0.42 m seat sample beside
+    a floor sample is a 0.42 m ramp over one cell, half of it on walkable
+    ground; a box gives the sofa its vertical front and puts the seat at the
+    top of the box.
+    """
+    from scipy import ndimage
+
+    fence = uncovered_cells(navmesh)
+    near = ndimage.binary_dilation(navmesh.grid, iterations=max(1, int(round(reach_m / navmesh.cell_size))))
+    candidates = fence | (near & ~np.isfinite(np.asarray(navmesh.ground_z)))
+    seen = wall_heights(navmesh, candidates, mesh_points, mesh_normals, splat_points, height_m=height_m)
+    cells = fence | np.isfinite(seen)
+    return cells, np.where(np.isfinite(seen), seen, np.where(cells, height_m, 0.0))
 
 
 def wall_boxes(navmesh, wall_cells: np.ndarray, heights: np.ndarray, *, step_m: float = 0.06):

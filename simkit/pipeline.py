@@ -84,7 +84,7 @@ def build_scene(
     from simkit.frame360 import scene_frame
     from simkit.gate import evaluate_gate, floor_registration, layer_residual, plumb_measurement
     from simkit.geometry.collision import build_collision_proxy
-    from simkit.geometry.coverage_bounds import mesh_witness, uncovered_cells, wall_boxes, wall_heights
+    from simkit.geometry.coverage_bounds import REACH_M, coverage_walls, mesh_witness, wall_boxes
     from simkit.geometry.navmesh import Navmesh, build_navmesh, cell_size_for
     from simkit.geometry.splat_obstacles import obstacle_boxes, obstacle_cells
     from simkit.geometry.up_check import splat_up_verdict
@@ -148,6 +148,12 @@ def build_scene(
     centroids = vertices_now[triangles_now].mean(axis=1)
     distance, _ = cKDTree(positions[:, :2]).query(centroids[:, :2])
     keep = distance <= walk_buffer_m
+    # The coverage walls read structure up to REACH_M past walkable ground,
+    # which itself reaches the crop's edge: their witness keeps that much more,
+    # or a wall cut by the crop would read as low furniture.
+    witness_mesh = o3d.geometry.TriangleMesh(mesh)
+    witness_mesh.remove_triangles_by_mask(distance > walk_buffer_m + REACH_M)
+    witness_mesh.remove_unreferenced_vertices()
     if keep.any() and not keep.all():
         mesh.remove_triangles_by_mask(~keep)
         mesh.remove_unreferenced_vertices()
@@ -184,7 +190,8 @@ def build_scene(
         log(f"S5 cell size {cell_size:.2f} m (a foot); surface sampled per cell")
     navmesh = build_navmesh(mesh, cell_size=cell_size, seed_points=frame.ground_points[:, :2])
     # The coverage walls are sized from the same full-resolution surface.
-    mesh_points, mesh_normals = mesh_witness(mesh, cell_size)
+    mesh_points, mesh_normals = mesh_witness(witness_mesh, cell_size)
+    del witness_mesh
 
     if simplify_to and len(mesh.triangles) > simplify_to:
         mesh = mesh.simplify_quadric_decimation(target_number_of_triangles=simplify_to)
@@ -219,9 +226,9 @@ def build_scene(
 
     # Containment: the height field fills ground past the mesh's coverage, and
     # nothing would stop a drifting robot from walking onto it. Each wall is as
-    # tall as what the mesh or the splat saw there (a sofa, a pane the mesh lost).
-    wall_grid = uncovered_cells(navmesh)
-    heights = wall_heights(navmesh, wall_grid, mesh_points, mesh_normals, solid_means)
+    # tall as what the mesh or the splat saw there (a sofa, a pane the mesh
+    # lost), and the furniture past the fence gets boxes too.
+    wall_grid, heights = coverage_walls(navmesh, mesh_points, mesh_normals, solid_means)
     coverage_walls = wall_boxes(navmesh, wall_grid, heights) if wall_grid.any() else []
     del mesh_points, mesh_normals
     stages["s5_coverage_walls"] = {"wall_cells": int(wall_grid.sum()), "boxes": len(coverage_walls)}

@@ -53,12 +53,14 @@ def obstacle_cells(
     return grid
 
 
-def obstacle_boxes(navmesh, blocked: np.ndarray, *, height_m: float = 1.6, max_boxes: int = 150):
+def obstacle_boxes(navmesh, blocked: np.ndarray, *, height_m: float = 1.6):
     """Axis-aligned collision boxes over splat-witnessed obstacle clusters.
 
     Merged with the same greedy sweep as everything else grid-shaped here. The
     boxes are deliberately generous — full band height over the whole blocked
     cell — because their job is to stop a walking robot, not to model a car.
+    Every cluster gets its box: a cap of 150 left the rest without collision,
+    on 20 of the 50 sample scenes.
     """
     from scipy import ndimage
 
@@ -86,6 +88,4 @@ def obstacle_boxes(navmesh, blocked: np.ndarray, *, height_m: float = 1.6, max_b
             "half_extents": half.tolist(),
             "cells": int(len(cells)),
         })
-        if len(boxes) >= max_boxes:
-            break
     return boxes
