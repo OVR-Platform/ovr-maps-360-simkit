@@ -25,10 +25,17 @@ def uncovered_cells(navmesh, *, margin_m: float = 0.45, min_hole_m2: float = 1.0
 
     A cell needs a wall when (a) the mesh never observed ground there, (b) it
     belongs to an uncovered region large enough to be a genuine coverage gap
-    rather than scan noise, and (c) it lies within ``margin_m`` of somewhere
-    the robot can actually walk. The world outside the grid counts as
-    uncovered — the grid is padded before labelling — so walkable ground that
-    approaches the terrain's own edge gets fenced too.
+    rather than scan noise, and (c) it lies within ``margin_m`` of ground the
+    robot can stand on. The world outside the grid counts as uncovered — the
+    grid is padded before labelling — so walkable ground that approaches the
+    terrain's own edge gets fenced too.
+
+    "Ground the robot can stand on" is every cell with ground, not only the
+    navmesh grid: the stance-step filter and the splat obstacles take cells
+    out of the grid but leave their ground, and a robot still steps onto
+    them. Measured from the grid alone, the margin stopped short of the
+    coverage gap behind such cells and the fence had holes: on the office
+    scene 4b14390a, a glass partition with holes in the mesh was left open.
     """
     from scipy import ndimage
 
@@ -51,7 +58,7 @@ def uncovered_cells(navmesh, *, margin_m: float = 0.45, min_hole_m2: float = 1.0
     big_uncovered = large[labels][1:-1, 1:-1]
 
     margin_cells = max(1, int(round(margin_m / navmesh.cell_size)))
-    near_walkable = ndimage.binary_dilation(navmesh.grid, iterations=margin_cells)
+    near_walkable = ndimage.binary_dilation(covered, iterations=margin_cells)
     return big_uncovered & near_walkable
 
 
@@ -65,7 +72,9 @@ def wall_boxes(navmesh, wall_cells: np.ndarray, *, height_m: float = 1.6, max_bo
 
     Wall cells have no observed ground by definition, so bases come from the
     nearest observed ground: the same fill the height field itself uses, which
-    keeps each wall footed on the terrain it stands on.
+    keeps each wall footed on the terrain it stands on. The top is
+    ``height_m`` over the highest ground under the box, so on a slope no cell's
+    wall is lower than ``height_m``.
     """
     from scipy import ndimage
 
@@ -101,16 +110,17 @@ def wall_boxes(navmesh, wall_cells: np.ndarray, *, height_m: float = 1.6, max_bo
                 col = end + 1
                 continue
             base = float(filled[row : bottom + 1, col : end + 1].min())
+            top = float(filled[row : bottom + 1, col : end + 1].max()) + height_m
             centre = navmesh.origin + np.array(
                 [(col + end + 1) / 2, (row + bottom + 1) / 2]
             ) * navmesh.cell_size
             boxes.append({
                 "kind": "coverage_wall",
-                "centre": [float(centre[0]), float(centre[1]), base + height_m / 2],
+                "centre": [float(centre[0]), float(centre[1]), (base + top) / 2],
                 "half_extents": [
                     (end - col + 1) / 2 * navmesh.cell_size,
                     (bottom - row + 1) / 2 * navmesh.cell_size,
-                    height_m / 2,
+                    (top - base) / 2,
                 ],
                 "cells": int((end - col + 1) * (bottom - row + 1)),
             })
