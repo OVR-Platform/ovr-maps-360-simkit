@@ -85,7 +85,9 @@ def build_scene(
     from simkit.gate import evaluate_gate, floor_registration, layer_residual, plumb_measurement
     from simkit.geometry.collision import build_collision_proxy
     from simkit.geometry.coverage_bounds import uncovered_cells, wall_boxes
-    from simkit.geometry.navmesh import Navmesh, build_navmesh, cell_size_for
+    from simkit.geometry.navmesh import (
+        Navmesh, build_navmesh, build_navmesh_levels, cell_size_for, remove_obstacles_from_levels,
+    )
     from simkit.geometry.splat_obstacles import obstacle_boxes, obstacle_cells
     from simkit.geometry.up_check import splat_up_verdict
     from simkit.io.splat_io import load_splat
@@ -183,6 +185,7 @@ def build_scene(
         cell_size = cell_size_for(mesh)
         log(f"S5 cell size {cell_size:.2f} m (a foot); surface sampled per cell")
     navmesh = build_navmesh(mesh, cell_size=cell_size, seed_points=frame.ground_points[:, :2])
+    mesh_for_navmesh = o3d.geometry.TriangleMesh(mesh)  # full-resolution crop, before simplification
 
     if simplify_to and len(mesh.triangles) > simplify_to:
         mesh = mesh.simplify_quadric_decimation(target_number_of_triangles=simplify_to)
@@ -213,6 +216,17 @@ def build_scene(
         navmesh = Navmesh(navmesh.grid & ~blocked, navmesh.ground_z, navmesh.origin, navmesh.cell_size)
         log(f"S5 splat obstacles: {int(blocked.sum())} cells blocked, {len(splat_boxes)} boxes")
     stages["s5_splat_obstacles"] = {"blocked_cells": int(blocked.sum()), "boxes": len(splat_boxes)}
+
+    # Walkable space on every storey. The single-level navmesh above keeps the
+    # lowest surface of each cell, which is right for the height field but drops
+    # an upper floor wherever it stands over a lower one. Same grid, same rules.
+    levels = build_navmesh_levels(mesh_for_navmesh, cell_size=cell_size, seed_points=frame.ground_points)
+    levels, level_blocked = remove_obstacles_from_levels(levels, splat.solid(min_opacity=0.5).means)
+    np.save(layout.collision / "navmesh_levels_grid.npy", levels.grid)
+    np.save(layout.collision / "navmesh_levels_ground_z.npy", levels.ground_z)
+    stages["s5_navmesh_levels"] = levels.as_dict() | {"splat_blocked_cells": level_blocked}
+    log(f"S5 navmesh levels: {levels.area_m2:.1f} m2 walkable over {levels.levels} channel(s), "
+        f"{stages['s5_navmesh_levels']['cells_with_two_or_more_levels']} cells with storeys stacked")
 
     # Containment: the height field fills ground past the mesh's coverage, and
     # nothing would stop a drifting robot from walking onto it.

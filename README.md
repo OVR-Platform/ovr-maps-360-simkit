@@ -44,6 +44,8 @@ How those were made, because it decides what the frame is:
         ground_hfield.png            ground height field (16-bit)
         navmesh_grid.npy             walkable cells (bool, rows = y, cols = x)
         navmesh_ground_z.npy         ground height per cell (float, NaN off the navmesh)
+        navmesh_levels_grid.npy      walkable cells on every storey (bool, L x rows x cols)
+        navmesh_levels_ground_z.npy  ground height per storey and cell (float, NaN where none)
         part_NNN.obj                 convex parts (CoACD) for structure above the ground
       photoreal/splat.ply            the splat, moved into the simulation frame
     certification/
@@ -169,7 +171,16 @@ resting height is compared with the floor MuJoCo reported there
   get box colliders. Uncovered ground at the navmesh edge is fenced with wall
   boxes, so a drifting robot cannot walk onto invented height field.
   Being 2.5D, it cannot represent a walk that passes over another level: the
-  lower level wins, and such scenes fail check 4.
+  lower level wins. It is what the height field and the gate use.
+- The **multi-level navmesh** (`navmesh_levels_*.npy`) keeps every storey.
+  Per cell, the upward-facing surface is split wherever two heights are more
+  than 12 cm apart, and every surface is judged by the rules above: head
+  clearance, steps to the neighbouring cells, the stance limit, splat
+  obstacles. A surface is kept only if the walk reaches it (the ground under a
+  camera within 30 cm of its height) and its region still holds at least 1 m²
+  of stance, so a desk a camera was carried over does not become a floor.
+  Channel *k* is the *k*-th walkable surface of the cell counted upwards.
+  Stairs stay out, as in the single level: every tread is a step over 6 cm.
 - The **ground** is a height field (MJCF `hfield`, USD mesh); the structure
   above it is convex parts from **CoACD** (concavity threshold 0.30, up to 8
   hulls per tile, about 60 tiles).

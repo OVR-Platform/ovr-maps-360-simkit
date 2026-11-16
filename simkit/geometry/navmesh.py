@@ -253,3 +253,243 @@ def largest_connected_region(navmesh: Navmesh, *, max_step_m: float = 0.25,
         wanted = {int(np.argmax(sizes)) + 1}
     kept = np.isin(labels, sorted(wanted))
     return Navmesh(kept, np.where(kept, ground, np.nan), navmesh.origin, navmesh.cell_size)
+
+
+# ---------------------------------------------------------------------------
+# Multi-level walkable space.
+#
+# ``build_navmesh`` keeps one ground per cell, the lowest upward-facing surface,
+# so wherever a storey stands above another the upper one is discarded: on an
+# office with a first floor over the ground-floor hall, 984 cells of the first
+# floor under the operator's walk vanished that way. The simulation ground (the
+# height field) is single-valued by nature and keeps using that lowest level;
+# what a robot can stand on is not, and is what follows.
+
+
+@dataclass
+class NavmeshLevels:
+    """Walkable surfaces per cell, stacked from the bottom.
+
+    ``grid[k]`` / ``ground_z[k]``: the k-th walkable surface of each cell counted
+    upwards (k = 0 the lowest walkable one there), so a two-storey building is two
+    channels wherever the storeys overlap and one elsewhere. Every channel shares
+    ``origin`` and ``cell_size`` with the single-level navmesh of the same build.
+    """
+
+    grid: np.ndarray  # (L, H, W) bool
+    ground_z: np.ndarray  # (L, H, W) float, NaN where the channel has no walkable surface
+    origin: np.ndarray
+    cell_size: float
+
+    @property
+    def levels(self) -> int:
+        return int(self.grid.shape[0])
+
+    @property
+    def area_m2(self) -> float:
+        return float(self.grid.sum()) * self.cell_size**2
+
+    def channel(self, k: int) -> Navmesh:
+        return Navmesh(self.grid[k], self.ground_z[k], self.origin, self.cell_size)
+
+    def as_dict(self) -> dict:
+        return {
+            "cell_size_m": self.cell_size,
+            "levels": self.levels,
+            "walkable_cells": int(self.grid.sum()),
+            "walkable_area_m2": self.area_m2,
+            "area_by_channel_m2": [float(g.sum()) * self.cell_size**2 for g in self.grid],
+            "cells_with_two_or_more_levels": int((self.grid.sum(axis=0) >= 2).sum()),
+            "grid_shape": list(self.grid.shape),
+            "origin_xy": self.origin.tolist(),
+        }
+
+
+def build_navmesh_levels(
+    mesh,
+    *,
+    cell_size: float = 0.15,
+    flat_normal: float = 0.85,
+    clearance_m: float = 1.6,
+    max_step_m: float = 0.25,
+    min_floor_hits: int = 2,
+    surface_gap_m: float = 0.12,
+    seed_points: np.ndarray | None = None,
+    seed_tolerance_m: float = 0.30,
+    stance_step_m: float = 0.06,
+    max_surfaces_per_cell: int = 8,
+    min_region_m2: float = 1.0,
+) -> NavmeshLevels:
+    """Every walkable storey, not only the lowest one.
+
+    Per cell, the upward-facing samples are split into *surfaces* wherever two
+    consecutive heights are more than ``surface_gap_m`` apart (floor, table top,
+    cabinet top, the floor of the storey above...). Each surface is a candidate
+    ground, judged by the rules ``build_navmesh`` applies to the lowest one:
+    ``min_floor_hits`` samples, nothing of any orientation between 0.12 m and
+    ``clearance_m`` above it. Candidates are linked to the candidates of the four
+    neighbouring cells within ``max_step_m`` of height, and a component is kept
+    only if the walk reaches it: ``seed_points`` (sim-frame XYZ of the ground
+    under each camera) must fall in one of its cells within ``seed_tolerance_m``
+    of its height. That is what drops a clear table top or a cabinet top: they
+    are horizontal and may be clear, but nobody walked on them and they are not
+    a step away from anywhere somebody did. Without seeds the largest component
+    is kept. A component left with less than ``min_region_m2`` that holds a
+    stance is dropped all the same: a camera carried over a desk casts its
+    ground ray onto the desk top, which seeds the desk (measured: 2 m2 of desk
+    top seeded, 0.5 m2 of it far enough from the edges to hold a stance, 85 cm
+    above an office floor).
+
+    A kept surface then has to hold a stance: the heights of the nearest surface
+    in each of the eight surrounding cells (within ``clearance_m``) must span no
+    more than ``stance_step_m``, the rule the single-level pipeline applies to
+    its height field. Stairs therefore stay out, as there.
+    """
+    from scipy.sparse import coo_matrix
+    from scipy.sparse.csgraph import connected_components
+
+    faces = np.asarray(getattr(mesh, "triangles", np.zeros((0, 3), dtype=np.int64)))
+    if len(faces):
+        vertices, normals = surface_samples(np.asarray(mesh.vertices), faces, cell_size)
+    else:
+        vertices = np.asarray(mesh.vertices)
+        normals = np.asarray(mesh.vertex_normals)
+    if len(vertices) == 0:
+        return NavmeshLevels(np.zeros((0, 0, 0), dtype=bool), np.zeros((0, 0, 0)), np.zeros(2), cell_size)
+
+    lower = vertices[:, :2].min(axis=0)
+    upper = vertices[:, :2].max(axis=0)
+    width = max(1, int(np.ceil((upper[0] - lower[0]) / cell_size)))
+    height = max(1, int(np.ceil((upper[1] - lower[1]) / cell_size)))
+    columns = np.clip(((vertices[:, 0] - lower[0]) / cell_size).astype(int), 0, width - 1)
+    rows = np.clip(((vertices[:, 1] - lower[1]) / cell_size).astype(int), 0, height - 1)
+    flat_index = rows * width + columns
+    cells = width * height
+
+    # 1. Candidate surfaces: upward samples of a cell, split at vertical gaps.
+    up = normals[:, 2] > flat_normal
+    up_index, up_z = flat_index[up], vertices[up, 2]
+    order = np.lexsort((up_z, up_index))
+    up_index, up_z = up_index[order], up_z[order]
+    new_cell = np.ones(len(up_index), dtype=bool)
+    new_cell[1:] = up_index[1:] != up_index[:-1]
+    new_surface = new_cell.copy()
+    new_surface[1:] |= (up_z[1:] - up_z[:-1]) > surface_gap_m
+    surface_id = np.cumsum(new_surface) - 1
+    starts = np.flatnonzero(new_surface)
+    s_cell = up_index[starts]
+    s_ground = up_z[starts]  # lowest sample of the surface, as for the single level
+    s_hits = np.bincount(surface_id, minlength=len(starts))
+    # rank of the surface within its cell, to cap pathological stacks
+    cell_start = np.maximum.accumulate(np.where(new_cell[starts], np.arange(len(starts)), 0))
+    s_rank = np.arange(len(starts)) - cell_start
+    keep = (s_hits >= min_floor_hits) & (s_rank < max_surfaces_per_cell)
+
+    # 2. Head clearance above each candidate, from every sample of its cell.
+    by_cell = np.argsort(flat_index, kind="stable")
+    sorted_cells = flat_index[by_cell]
+    sample_start = np.searchsorted(sorted_cells, np.arange(cells), side="left")
+    sample_end = np.searchsorted(sorted_cells, np.arange(cells), side="right")
+    clear = np.zeros(len(starts), dtype=bool)
+    z_all = vertices[by_cell, 2]
+    for s in np.flatnonzero(keep):
+        z = z_all[sample_start[s_cell[s]]:sample_end[s_cell[s]]]
+        rel = z - s_ground[s]
+        clear[s] = not np.any((rel > 0.12) & (rel < clearance_m))
+    candidate = keep & clear
+
+    ids = np.flatnonzero(candidate)
+    if len(ids) == 0:
+        empty = np.zeros((1, height, width), dtype=bool)
+        return NavmeshLevels(empty, np.full((1, height, width), np.nan), lower, cell_size)
+    node_cell, node_z = s_cell[ids], s_ground[ids]
+    node_row, node_col = node_cell // width, node_cell % width
+
+    # Surfaces of every cell (walkable or not), for neighbour lookups.
+    per_cell_nodes: dict[int, list[int]] = {}
+    for n, c in enumerate(node_cell):
+        per_cell_nodes.setdefault(int(c), []).append(n)
+    all_surfaces: dict[int, np.ndarray] = {}
+    for c, z in zip(s_cell[keep], s_ground[keep]):
+        all_surfaces.setdefault(int(c), []).append(z)
+    all_surfaces = {c: np.asarray(v) for c, v in all_surfaces.items()}
+
+    # 3. Height-aware connectivity between candidates of 4-neighbouring cells.
+    src, dst = [], []
+    for n in range(len(ids)):
+        r, c = node_row[n], node_col[n]
+        for dr, dc in ((0, 1), (1, 0)):
+            rr, cc = r + dr, c + dc
+            if rr >= height or cc >= width:
+                continue
+            for m in per_cell_nodes.get(int(rr * width + cc), ()):
+                if abs(node_z[m] - node_z[n]) <= max_step_m:
+                    src.append(n)
+                    dst.append(m)
+    graph = coo_matrix((np.ones(len(src)), (src, dst)), shape=(len(ids), len(ids)))
+    _, label = connected_components(graph, directed=False)
+
+    wanted: set[int] = set()
+    if seed_points is not None and len(seed_points):
+        seeds = np.asarray(seed_points, dtype=np.float64)
+        sc = np.floor((seeds[:, 0] - lower[0]) / cell_size).astype(int)
+        sr = np.floor((seeds[:, 1] - lower[1]) / cell_size).astype(int)
+        inside = (sr >= 0) & (sr < height) & (sc >= 0) & (sc < width)
+        for r, c, z in zip(sr[inside], sc[inside], seeds[inside, 2]):
+            for n in per_cell_nodes.get(int(r * width + c), ()):
+                if abs(node_z[n] - z) <= seed_tolerance_m:
+                    wanted.add(int(label[n]))
+    if not wanted:
+        wanted = {int(np.argmax(np.bincount(label)))}
+    reached = np.isin(label, sorted(wanted))
+
+    # 4. Stance: the surrounding ground must not step more than stance_step_m.
+    stance = np.zeros(len(ids), dtype=bool)
+    for n in np.flatnonzero(reached):
+        r, c, z = node_row[n], node_col[n], node_z[n]
+        lo = hi = z
+        for dr in (-1, 0, 1):
+            for dc in (-1, 0, 1):
+                rr, cc = r + dr, c + dc
+                if (dr == 0 and dc == 0) or not (0 <= rr < height and 0 <= cc < width):
+                    continue
+                near = all_surfaces.get(int(rr * width + cc))
+                if near is None:
+                    continue
+                d = near - z
+                d = d[np.abs(d) < clearance_m]
+                if len(d):
+                    closest = z + d[np.argmin(np.abs(d))]
+                    lo, hi = min(lo, closest), max(hi, closest)
+        stance[n] = (hi - lo) <= stance_step_m
+    standing = reached & stance
+    kept_area = np.bincount(label[standing], minlength=label.max() + 1) * cell_size**2
+    final = np.flatnonzero(standing & (kept_area[label] >= min_region_m2))
+
+    # 5. Stack per cell, bottom up.
+    order = np.lexsort((node_z[final], node_cell[final]))
+    final = final[order]
+    fc = node_cell[final]
+    first = np.ones(len(fc), dtype=bool)
+    first[1:] = fc[1:] != fc[:-1]
+    rank = np.arange(len(fc)) - np.maximum.accumulate(np.where(first, np.arange(len(fc)), 0))
+    levels = int(rank.max()) + 1 if len(rank) else 1
+    grid = np.zeros((levels, height, width), dtype=bool)
+    ground = np.full((levels, height, width), np.nan)
+    grid[rank, fc // width, fc % width] = True
+    ground[rank, fc // width, fc % width] = node_z[final]
+    return NavmeshLevels(grid, ground, lower, cell_size)
+
+
+def remove_obstacles_from_levels(levels: NavmeshLevels, splat_points: np.ndarray, **kwargs) -> tuple[NavmeshLevels, int]:
+    """The splat-witnessed obstacle rule of the single level, applied per channel."""
+    from simkit.geometry.splat_obstacles import obstacle_cells
+
+    grid = levels.grid.copy()
+    blocked = 0
+    for k in range(levels.levels):
+        b = obstacle_cells(levels.channel(k), splat_points, **kwargs) & grid[k]
+        blocked += int(b.sum())
+        grid[k] &= ~b
+    ground = np.where(grid, levels.ground_z, np.nan)
+    return NavmeshLevels(grid, ground, levels.origin, levels.cell_size), blocked

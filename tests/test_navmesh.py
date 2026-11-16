@@ -206,3 +206,82 @@ def test_a_thin_post_still_blocks_its_cell():
 def test_empty_mesh_yields_empty_navmesh():
     navmesh = build_navmesh(FakeMesh(np.zeros((0, 3)), np.zeros((0, 3))))
     assert navmesh.area_m2 == 0.0
+
+
+# --- multi-level -------------------------------------------------------------
+
+from simkit.geometry.navmesh import build_navmesh_levels  # noqa: E402
+
+
+def _two_storeys():
+    """Ground floor 0..6 m, first floor 0..4 m at 3 m, joined by nothing walkable."""
+    ground, ground_n = _floor_patch((0, 6), (0, 3))
+    upper, upper_n = _floor_patch((0, 4), (0, 3), z=3.0)
+    slab_under = upper.copy()
+    slab_under[:, 2] = 2.8  # the slab's underside, facing down
+    under_n = np.tile([0.0, 0.0, -1.0], (len(slab_under), 1))
+    points = np.vstack([ground, upper, slab_under])
+    normals = np.vstack([ground_n, upper_n, under_n])
+    return FakeMesh(points, normals)
+
+
+def test_single_level_navmesh_loses_the_storey_above():
+    """The defect the multi-level navmesh exists for: lowest surface wins."""
+    navmesh = build_navmesh(_two_storeys(), cell_size=0.25)
+    assert np.nanmax(navmesh.ground_z[navmesh.grid]) < 1.0
+
+
+def test_both_storeys_are_walkable_where_they_overlap():
+    seeds = np.array([[1.0, 1.5, 0.0], [1.0, 1.5, 3.0]])
+    levels = build_navmesh_levels(_two_storeys(), cell_size=0.25, seed_points=seeds)
+
+    assert levels.levels == 2
+    stacked = levels.grid.sum(axis=0) >= 2
+    assert stacked.sum() * 0.25**2 > 6.0  # most of the 4 x 3 m overlap
+    assert np.nanmin(levels.ground_z[1][levels.grid[1]]) == pytest.approx(3.0, abs=0.05)
+    # the part of the ground floor with nothing above it is a single level
+    assert levels.grid[0][:, -4:].any() and not levels.grid[1][:, -4:].any()
+
+
+def test_a_storey_nobody_walked_on_is_not_kept():
+    seeds = np.array([[1.0, 1.5, 0.0]])  # the walk stayed downstairs
+    levels = build_navmesh_levels(_two_storeys(), cell_size=0.25, seed_points=seeds)
+
+    heights = levels.ground_z[levels.grid]
+    assert heights.size and np.nanmax(heights) < 1.0
+
+
+def test_a_table_top_is_not_a_storey():
+    """Clear and horizontal, but nobody stands on a desk."""
+    floor, floor_n = _floor_patch((0, 4), (0, 3))
+    top, top_n = _floor_patch((1, 2), (1, 2), z=0.75)
+    seeds = np.array([[3.5, 0.5, 0.0]])
+    levels = build_navmesh_levels(
+        FakeMesh(np.vstack([floor, top]), np.vstack([floor_n, top_n])), cell_size=0.25, seed_points=seeds)
+
+    heights = levels.ground_z[levels.grid]
+    assert np.nanmax(heights) < 0.1
+    rows, cols = np.nonzero(levels.grid.any(axis=0))
+    xy = levels.origin + np.stack([cols, rows], axis=1) * 0.25 + 0.125
+    under = (xy[:, 0] > 1.1) & (xy[:, 0] < 1.9) & (xy[:, 1] > 1.1) & (xy[:, 1] < 1.9)
+    assert not under.any()  # nor is the floor under it
+
+
+def test_lowest_channel_matches_single_level_on_one_storey():
+    floor, floor_n = _floor_patch((0, 3), (0, 2))
+    mesh = FakeMesh(floor, floor_n)
+    single = build_navmesh(mesh, cell_size=0.2)
+    levels = build_navmesh_levels(mesh, cell_size=0.2, stance_step_m=1.0)
+    assert levels.levels == 1
+    assert np.array_equal(levels.grid[0], single.grid)
+
+
+def test_a_desk_seeded_by_a_camera_passing_over_it_is_dropped():
+    """The ground ray of a camera carried over a desk lands on the desk top."""
+    floor, floor_n = _floor_patch((0, 4), (0, 3))
+    top, top_n = _floor_patch((1, 2.2), (1, 2.2), z=0.85)  # 1.4 m2 desk, its interior holds a stance
+    seeds = np.array([[3.5, 0.5, 0.0], [1.7, 1.7, 0.85]])
+    levels = build_navmesh_levels(
+        FakeMesh(np.vstack([floor, top]), np.vstack([floor_n, top_n])), cell_size=0.25, seed_points=seeds)
+
+    assert np.nanmax(levels.ground_z[levels.grid]) < 0.1
