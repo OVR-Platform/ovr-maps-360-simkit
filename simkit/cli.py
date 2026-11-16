@@ -6,6 +6,7 @@
     simkit regate <bundle.sre>                   re-run the MuJoCo probes on a built bundle
     simkit rescore <scene_out_dir>               re-apply the gate from recorded measurements
     simkit verify <scene_out_dir>                check the outputs of one scene
+    simkit navmesh-glb <bundle.sre> <out.glb>    multi-level navmesh as glb, source frame
 
 Outputs of scene ``<uuid>`` go to ``<root>/<uuid>/`` (default: the scene
 directory itself):
@@ -223,6 +224,13 @@ def cmd_verify(args) -> int:
     return 1 if problems else 0
 
 
+def cmd_navmesh_glb(args) -> int:
+    from simkit.export.navmesh_glb import navmesh_levels_to_glb
+
+    print(json.dumps(navmesh_levels_to_glb(args.bundle, args.out), indent=2))
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="simkit", description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -268,6 +276,11 @@ def main(argv: list[str] | None = None) -> int:
     p = sub.add_parser("verify", help="check the outputs of one scene")
     p.add_argument("scene_out_dir")
     p.set_defaults(func=cmd_verify)
+
+    p = sub.add_parser("navmesh-glb", help="multi-level navmesh of a bundle as glb, in the source frame")
+    p.add_argument("bundle")
+    p.add_argument("out")
+    p.set_defaults(func=cmd_navmesh_glb)
 
     args = parser.parse_args(argv)
     try:
