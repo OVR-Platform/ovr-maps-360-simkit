@@ -6,7 +6,8 @@
     simkit regate <bundle.sre>                   re-run the MuJoCo probes on a built bundle
     simkit rescore <scene_out_dir>               re-apply the gate from recorded measurements
     simkit verify <scene_out_dir>                check the outputs of one scene
-    simkit navmesh-glb <bundle.sre> <out.glb>    multi-level navmesh as glb, source frame
+    simkit navmesh-glb <bundle.sre> <out.glb>    multi-level navmesh as glb, source frame (viewer)
+    simkit navmesh-obj <bundle.sre> <out.obj>    walkable surface as obj, source frame (Unity bake)
 
 Outputs of scene ``<uuid>`` go to ``<root>/<uuid>/`` (default: the scene
 directory itself):
@@ -231,6 +232,13 @@ def cmd_navmesh_glb(args) -> int:
     return 0
 
 
+def cmd_navmesh_obj(args) -> int:
+    from simkit.export.navmesh_obj import navmesh_levels_to_obj
+
+    print(json.dumps(navmesh_levels_to_obj(args.bundle, args.out), indent=2))
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="simkit", description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -281,6 +289,11 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("bundle")
     p.add_argument("out")
     p.set_defaults(func=cmd_navmesh_glb)
+
+    p = sub.add_parser("navmesh-obj", help="walkable surface of every storey as obj, in the source frame")
+    p.add_argument("bundle")
+    p.add_argument("out")
+    p.set_defaults(func=cmd_navmesh_obj)
 
     args = parser.parse_args(argv)
     try:
