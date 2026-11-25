@@ -89,7 +89,7 @@ def build_scene(
         Navmesh, build_navmesh, build_navmesh_levels, cell_size_for, remove_obstacles_from_levels,
     )
     from simkit.geometry.splat_obstacles import obstacle_boxes, obstacle_cells
-    from simkit.geometry.up_check import splat_up_verdict
+    from simkit.geometry.up_check import camera_up_verdict, splat_up_verdict
     from simkit.io.splat_io import load_splat
     from simkit.photoreal import transform_splat, write_splat_ply
     from simkit.physics.probes import run_floor_probes, sample_floor_points
@@ -132,7 +132,7 @@ def build_scene(
     mesh.transform(frame.transform)
     mesh.compute_vertex_normals()
 
-    from simkit.frame360 import load_camera_positions
+    from simkit.frame360 import load_camera_positions, load_camera_rotations
 
     positions = load_camera_positions(inputs["cameras"]) @ frame.transform[:3, :3].T + frame.transform[:3, 3]
 
@@ -168,13 +168,16 @@ def build_scene(
     # can be a roof; within 3 m of the walk the densest slab is the floor the
     # operator stood on, unless the scene is upside down.
     walked_xy, _ = cKDTree(positions[:, :2]).query(splat.means[:, :2])
-    up_verdict = splat_up_verdict(splat.filter(walked_xy <= 3.0))
+    up_verdict = camera_up_verdict(np.einsum("ij,njk->nik", frame.transform[:3, :3],
+                                             load_camera_rotations(inputs["cameras"])))
+    splat_slab = splat_up_verdict(splat.filter(walked_xy <= 3.0))
     plumb = plumb_measurement(splat.filter(walked_xy <= walk_buffer_m),
                               np.asarray(mesh.vertices), np.asarray(mesh.triangles))
-    stages["s1_up_check_after"] = up_verdict | {"witness": "splat within 3 m of the walk"}
+    stages["s1_up_check_after"] = up_verdict | {"witness": "image-down of the horizontal views"}
+    stages["s1_splat_slab"] = splat_slab | {"witness": "splat within 3 m of the walk (information, not gated)"}
     stages["s1_plumb"] = plumb
     log(f"S1 up-check: {'inverted' if up_verdict.get('inverted') else 'upright'}"
-        f" (densest slab at {up_verdict.get('relative_position', float('nan')):.2f} of the walked height); "
+        f" (image-down along gravity {up_verdict.get('image_down_along_gravity_median', float('nan')):.3f}); "
         f"plumb {plumb['tilt_deg']:.3f} deg against the {plumb['reference']}")
 
     # The navmesh reads the full-resolution crop; the collision proxy reads a

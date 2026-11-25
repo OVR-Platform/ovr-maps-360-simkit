@@ -1,10 +1,10 @@
-"""Orientation witnesses read from the splat.
+"""Orientation witnesses.
 
-Which way is up: a walk-through sweeps the floor from close range for the whole
-capture, so near the walked path the floor is the densest horizontal slab of
-Gaussians; a ceiling is seen from far away, at grazing angles, and reconstructs
-thinly. If that slab sits in the upper part of the walked height, the scene is
-upside down.
+Which way is up is read from the cameras (``camera_up_verdict``): the bottom of
+every horizontal view looks at the ground. The splat's densest horizontal slab
+(``splat_up_verdict``) is recorded as well but no longer decides: it assumes
+the floor reconstructs more densely than anything above the walk, which holds
+outdoors and in small rooms and fails under a dense vault or a low ceiling.
 
 How far off plumb: walls are vertical by construction, and a Gaussian that
 models a surface is a flat disc whose shortest axis is the surface normal, so
@@ -58,6 +58,43 @@ def splat_up_verdict(splat, *, min_opacity: float = 0.5, inverted_above: float =
         "densest_layer_z": height,
         "relative_position": position,
         "solid_gaussians": int(len(solid)),
+    }
+
+
+def camera_up_verdict(rotations: np.ndarray, *, horizontal_within: float = 0.3,
+                      min_views: int = 100) -> dict:
+    """Whether the frame is the right way up, from how the cameras were held.
+
+    The horizontal views are cut from the fisheye with the rig the way the
+    operator held it, upright on the pole: the bottom of every such image looks
+    at the ground. So the image's down axis, carried into the simulation frame
+    by the capture's own registration, must point along gravity (-Z). A frame
+    turned over by the registration turns the cameras over with it, and their
+    image-down axes point up.
+
+    Unlike the densest slab of the splat, this does not depend on what the
+    scene holds: a station vault 8 m above the walk, or a subway ceiling
+    1.25 m above the camera, reconstructs more densely than the floor, and the
+    slab reads upside down a scene that is not (both measured). Over the 50
+    scenes of the sample and two covered stations, image-down sits within 15
+    degrees of gravity (median cosine 0.96-0.999) in every horizontal view.
+
+    ``rotations`` are (N, 3, 3) in the simulation frame, columns as in
+    ``training_cameras.json``.
+    """
+    rotations = np.asarray(rotations, dtype=np.float64)
+    optical, image_down = rotations[:, :, 2], rotations[:, :, 1]
+    horizontal = np.abs(optical[:, 2]) < horizontal_within
+    if horizontal.sum() < min_views:
+        return {"decidable": False, "reason": f"{int(horizontal.sum())} horizontal views (min {min_views})"}
+    along_gravity = -image_down[horizontal, 2]
+    median = float(np.median(along_gravity))
+    return {
+        "decidable": True,
+        "inverted": bool(median < 0.0),
+        "image_down_along_gravity_median": median,
+        "views_with_image_down_below_horizon": float((along_gravity > 0.0).mean()),
+        "horizontal_views": int(horizontal.sum()),
     }
 
 

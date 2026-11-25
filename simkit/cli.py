@@ -5,6 +5,7 @@
     simkit lod    <surface.ply> <out_dir> <id8>  LODs only
     simkit regate <bundle.sre>                   re-run the MuJoCo probes on a built bundle
     simkit rescore <scene_out_dir>               re-apply the gate from recorded measurements
+    simkit rescore <out> --scene-dir <scene> --remeasure   ... measuring checks 1 and 4 again
     simkit verify <scene_out_dir>                check the outputs of one scene
     simkit navmesh-glb <bundle.sre> <out.glb>    multi-level navmesh as glb, source frame (viewer)
     simkit navmesh-obj <bundle.sre> <out.obj>    walkable surface as obj, source frame (Unity bake)
@@ -180,6 +181,10 @@ def cmd_rescore(args) -> int:
             raise SystemExit("this bundle predates s7_floor_registration: pass --scene-dir <source scene>")
         manifest["stages"]["s7_floor_registration"] = _floor_registration_from_source(
             Path(args.scene_dir), out["bundle"], manifest)
+    if args.remeasure:
+        if not args.scene_dir:
+            raise SystemExit("--remeasure reads the source splat and cameras: pass --scene-dir <source scene>")
+        manifest["stages"].update(_remeasure_orientation_and_alignment(Path(args.scene_dir), out["bundle"], manifest))
     qa, plumb = rescore(manifest)
     manifest["qa"], manifest["stages"]["s1_plumb"] = qa, plumb
     manifest["tier"] = "T1a" if qa["passed"] else "FAILED"
@@ -192,6 +197,38 @@ def cmd_rescore(args) -> int:
     failed = [k for k, v in qa["checks"].items() if not v]
     print(f"[{out['id8']}] {before} -> {manifest['tier']}" + (f" ({', '.join(failed)})" if failed else ""))
     return 0
+
+
+def _remeasure_orientation_and_alignment(scene_dir: Path, bundle: Path, manifest: dict) -> dict:
+    """Checks 1 and 4 measured again, as the build measures them now, from the
+    source splat and cameras and the bundle's own frame and collision surface."""
+    import numpy as np
+    import open3d as o3d
+    from scipy.spatial import cKDTree
+
+    from simkit.frame360 import load_camera_positions, load_camera_rotations
+    from simkit.gate import layer_residual
+    from simkit.geometry.up_check import camera_up_verdict, splat_up_verdict
+    from simkit.io.splat_io import load_splat
+    from simkit.photoreal import transform_splat
+    from simkit.pipeline import scene_inputs
+
+    inputs = scene_inputs(scene_dir)
+    transform = np.array(json.loads((bundle / "frame" / "transform.json").read_text())["sim_from_source"])
+    positions = load_camera_positions(inputs["cameras"]) @ transform[:3, :3].T + transform[:3, 3]
+    splat = transform_splat(load_splat(inputs["splat"]), transform)
+    surface = o3d.io.read_triangle_mesh(str(bundle / "collision" / "surface.ply"))
+    walked_xy, _ = cKDTree(positions[:, :2]).query(splat.means[:, :2])
+    corridor = manifest["stages"].get("s1_walk_crop", {}).get("buffer_m", 12.0)
+    return {
+        "s1_up_check_after": camera_up_verdict(np.einsum("ij,njk->nik", transform[:3, :3],
+                                                         load_camera_rotations(inputs["cameras"])))
+        | {"witness": "image-down of the horizontal views"},
+        "s1_splat_slab": splat_up_verdict(splat.filter(walked_xy <= 3.0))
+        | {"witness": "splat within 3 m of the walk (information, not gated)"},
+        "s7_layer_residual": layer_residual(splat, np.asarray(surface.vertices), np.asarray(surface.triangles),
+                                            positions, corridor_m=corridor),
+    }
 
 
 def _floor_registration_from_source(scene_dir: Path, bundle: Path, manifest: dict) -> dict:
@@ -279,6 +316,8 @@ def main(argv: list[str] | None = None) -> int:
     p = sub.add_parser("rescore", help="re-apply the gate from recorded measurements")
     p.add_argument("scene_out_dir")
     p.add_argument("--scene-dir", help="source scene, for bundles built before s7_floor_registration")
+    p.add_argument("--remeasure", action="store_true",
+                   help="measure checks 1 and 4 again from --scene-dir (bundles built before they changed)")
     p.set_defaults(func=cmd_rescore)
 
     p = sub.add_parser("verify", help="check the outputs of one scene")

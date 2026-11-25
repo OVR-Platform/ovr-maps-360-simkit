@@ -121,10 +121,10 @@ part of the contract and are not relaxed to make a scene pass.
 
 | # | check | measured as | threshold |
 |---|---|---|---|
-| 1 | `up_direction_verified` | the densest horizontal slab of the splat within 3 m of the walk sits in the lower part of the walked height, and ≥ 90% of camera centres have ground beneath them | decidable, not inverted |
+| 1 | `up_direction_verified` | the bottom of the horizontal training views points down: image-down axis along gravity, median over ≥ 100 views; and ≥ 90% of camera centres have ground beneath them | decidable, not inverted |
 | 2 | `scene_plumb_under_2deg` | vertical implied by the walls, from the splat's disc Gaussians and from the mesh faces, against the frame's +Z; the tilt is the **smaller** of the two witnesses, since a broken alignment tilts the walls in both reconstructions | < 2° |
 | 3 | `floor_at_origin_under_5cm` | under every camera on a walkable cell, navmesh ground height against the ray-cast floor: median absolute difference, and the navmesh must cover at least 20% of the cameras | < 5 cm, >= 20% covered |
-| 4 | `alignment_residual_under_25cm` | median distance from the splat's solid Gaussians (opacity > 0.5) to the collision surface, within 12 m of the walk | < 25 cm |
+| 4 | `alignment_residual_under_25cm` | offset between splat and collision surface: the similarity transform that best moves the solid Gaussians (opacity > 0.5, within 12 m of the walk) onto the surface (trimmed ICP), and how far it moves them, 90th percentile | < 25 cm |
 | 5 | `walkable_area_over_5m2` | navmesh area after the stance step filter and splat obstacles | ≥ 5 m² |
 | 6 | `no_collision_leak` | foot-sized damped plates dropped on 40 navmesh cells in MuJoCo: none falls through | 0% |
 | 7 | `probes_settle` | plates at rest within 3 s | ≥ 90% |
@@ -134,6 +134,23 @@ Why the threshold of check 2 is where it is: over the 50 scenes of the sample,
 the two wall witnesses disagree with each other by 0.9° median (1.9° p90), so
 2° is where a real alignment error stands out from witness noise, and 2° of
 gravity error is a 3.5% slope under a robot's feet.
+
+Checks 1 and 4 hold indoors as well as outdoors. Check 1 used to read up
+from the splat: near the walk the floor should be its densest horizontal slab.
+Under a station vault 8 m above the walk, or a subway ceiling 1.25 m above the
+camera, the ceiling is denser, and an upright scene read as upside down. The
+cameras do not depend on what the scene holds: the horizontal views are cut
+with the rig upright on the pole, so the bottom of each image looks at the
+ground, and a frame turned over by the registration turns them over with it.
+On the 50 scenes of the sample and two covered stations, image-down is within
+15° of gravity in every horizontal view (median cosine 0.96–0.999). The slab
+is still recorded (`s1_splat_slab`). Check 4 used to be the median distance
+from the splat to the surface, but the splat holds much the mesh does not
+(chandeliers, foliage, glass, what is seen through an opening): on a station
+hall it read 32 cm with the two reconstructions within 2 cm and 0.03° of each
+other, and a 30 cm shift of the splat moved it by 3 cm. The fitted offset
+measures the shift itself (31 cm for 30 cm, about 1.6 m at the far end for 1°
+of yaw); the plain distance is still recorded (`splat_to_surface_median_m`).
 
 The angle between the plane of the camera trajectory and the plane of the
 ground beneath it is recorded (`witness_disagreement_deg`) but no longer
@@ -160,7 +177,7 @@ resting height is compared with the floor MuJoCo reported there
 
 - **Collision** comes from the mesh, **appearance** from the splat. They are two
   reconstructions of one capture in one frame, so no registration is needed;
-  check 5 measures how far apart they are (about 4–6 cm median on the sample).
+  check 4 measures how far apart they are.
 - The mesh is **cropped** to 12 m around the walked path: a robot cannot be
   evaluated where the capture had no observations, and the convex
   decomposition pays for every distant triangle.

@@ -53,10 +53,10 @@ import numpy as np
 
 CHECK_TABLE = [
     # key, label, threshold (as printed in the certificate)
-    ("up_direction_verified", "up direction verified (splat slab + ground under cameras)", "decidable, not inverted"),
+    ("up_direction_verified", "up direction verified (camera image-down + ground under cameras)", "decidable, not inverted"),
     ("scene_plumb_under_2deg", "scene plumb (walls vs frame vertical)", "< 2 deg"),
     ("floor_at_origin_under_5cm", "floor registered (navmesh under >= 20% of the walk, vs ground under cameras)", "< 5 cm"),
-    ("alignment_residual_under_25cm", "alignment residual, splat to collision surface", "< 25 cm"),
+    ("alignment_residual_under_25cm", "alignment residual, splat to collision surface (fitted offset, p90)", "< 25 cm"),
     ("walkable_area_over_5m2", "walkable area", ">= 5 m2"),
     ("no_collision_leak", "no collision leak (no probe falls through)", "0%"),
     ("probes_settle", "probes settle", ">= 90%"),
@@ -82,7 +82,7 @@ def evaluate_gate(
         "scene_plumb_under_2deg": plumb.get("tilt_deg", float("inf")) < 2.0,
         "floor_at_origin_under_5cm": floor_registration.get("walkable_fraction", 0.0) >= 0.2
         and floor_registration.get("median_abs_m", float("inf")) < 0.05,
-        "alignment_residual_under_25cm": layer_residual.get("median_m", float("inf")) < 0.25,
+        "alignment_residual_under_25cm": _alignment_m(layer_residual) < 0.25,
         "walkable_area_over_5m2": walkable_area_m2 >= 5.0,
         "no_collision_leak": physics.get("leak_rate", 1.0) == 0.0,
         "probes_settle": physics.get("settle_rate", 0.0) >= 0.9,
@@ -92,8 +92,11 @@ def evaluate_gate(
         "checks": checks,
         "passed": all(checks.values()),
         "measurements": {
-            "alignment_residual_m": layer_residual.get("median_m"),
-            "alignment_residual_p90_m": layer_residual.get("p90_m"),
+            "alignment_residual_m": _alignment_m(layer_residual),
+            "alignment_fit": {k: layer_residual[k] for k in layer_residual
+                              if k.startswith(("fit", "displacement"))},
+            "splat_to_surface_median_m": layer_residual.get("median_m"),
+            "splat_to_surface_p90_m": layer_residual.get("p90_m"),
             "camera_height_m": walk.get("camera_height_m"),
             "grounded_fraction": walk.get("grounded_fraction"),
             "witness_disagreement_deg": walk.get("mesh_agreement_deg"),
@@ -106,6 +109,14 @@ def evaluate_gate(
         | physics
         | {"orientation_up_check": up_verdict},
     }
+
+
+def _alignment_m(layer_residual: dict) -> float:
+    """The offset the gate judges: the fitted displacement (p90) when it was
+    measured, the plain splat-to-surface median for bundles built before."""
+    if "displacement_p90_m" in layer_residual:
+        return float(layer_residual["displacement_p90_m"])
+    return float(layer_residual.get("median_m", float("inf")))
 
 
 def _finite(value, default: float) -> float:
@@ -195,6 +206,65 @@ def layer_residual(sim_splat, surface_vertices: np.ndarray, surface_faces: np.nd
         "p90_m": float(np.percentile(distance, 90)),
         "gaussians": int(len(solid)),
         "corridor_m": corridor_m,
+    } | alignment_fit(solid, scene)
+
+
+def alignment_fit(points: np.ndarray, scene, *, inlier_schedule_m=(2.0, 1.0, 0.5, 0.3, 0.3, 0.3),
+                  iterations_per_step: int = 3, max_points: int = 200_000, seed: int = 0) -> dict:
+    """How far the splat sits from where the surface says it should be.
+
+    The distance from each Gaussian to the surface mixes two things: an offset
+    between the two reconstructions, which is what the gate is after, and
+    everything the splat holds and the mesh does not (chandeliers, foliage,
+    glass, the far side of an opening, passers-by). The second dominates in a
+    large covered space: a station hall with 37% of its Gaussians within 4 m of
+    a camera reads 0.32 m median distance with the two reconstructions within
+    2 cm and 0.03 deg of each other.
+
+    So the offset is measured as an offset: the similarity transform (rotation,
+    translation, scale) that best moves the solid Gaussians onto the surface,
+    fitted by trimmed ICP with a shrinking inlier distance so that only points
+    the surface actually explains vote. ``displacement_*`` is how far that
+    transform moves the Gaussians: zero when splat and surface agree, the size
+    of the error when they do not, whatever the mesh is missing.
+    """
+    import open3d as o3d
+
+    points = np.asarray(points, dtype=np.float64)
+    if len(points) > max_points:
+        points = points[np.random.default_rng(seed).choice(len(points), max_points, replace=False)]
+    moved = points.copy()
+    total = np.eye(4)
+    inliers = 0
+    for limit in inlier_schedule_m:
+        for _ in range(iterations_per_step):
+            closest = scene.compute_closest_points(o3d.core.Tensor(moved.astype(np.float32)))["points"].numpy()
+            keep = np.linalg.norm(closest - moved, axis=1) < limit
+            inliers = int(keep.sum())
+            if inliers < 1000:
+                return {"fit": "too few Gaussians near the surface", "fit_inliers": inliers}
+            src, dst = moved[keep], closest[keep]
+            src_mean, dst_mean = src.mean(axis=0), dst.mean(axis=0)
+            u, sigma, vt = np.linalg.svd((src - src_mean).T @ (dst - dst_mean))
+            flip = np.diag([1.0, 1.0, np.sign(np.linalg.det(vt.T @ u.T))])
+            rotation = vt.T @ flip @ u.T
+            scale = float((sigma * np.diag(flip)).sum() / ((src - src_mean) ** 2).sum())
+            step = np.eye(4)
+            step[:3, :3] = scale * rotation
+            step[:3, 3] = dst_mean - scale * rotation @ src_mean
+            moved = moved @ step[:3, :3].T + step[:3, 3]
+            total = step @ total
+    displacement = np.linalg.norm(points @ total[:3, :3].T + total[:3, 3] - points, axis=1)
+    linear = total[:3, :3]
+    scale = float(np.cbrt(np.linalg.det(linear)))
+    cosine = (np.trace(linear / scale) - 1.0) / 2.0
+    return {
+        "displacement_median_m": float(np.median(displacement)),
+        "displacement_p90_m": float(np.percentile(displacement, 90)),
+        "fit_scale": scale,
+        "fit_rotation_deg": float(np.degrees(np.arccos(np.clip(cosine, -1.0, 1.0)))),
+        "fit_translation_m": total[:3, 3].tolist(),
+        "fit_inliers": inliers,
     }
 
 

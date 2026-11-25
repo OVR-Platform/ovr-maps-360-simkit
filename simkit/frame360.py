@@ -70,6 +70,14 @@ def load_camera_positions(path: str | Path) -> np.ndarray:
     return np.unique(positions.round(6), axis=0)
 
 
+def load_camera_rotations(path: str | Path) -> np.ndarray:
+    """(N, 3, 3) rotations of every view in ``training_cameras.json``; the
+    columns are the camera's x (image right), y (image down) and optical axis,
+    in the source frame."""
+    cameras = json.loads(Path(path).read_text())
+    return np.array([c["rotation"] for c in cameras], dtype=np.float64)
+
+
 def _plane_normal(points: np.ndarray, *, rounds: int = 6, tolerance: float = 0.05) -> tuple[np.ndarray, int]:
     """Robust plane normal (sign pointing to sim +Z) and the inlier count."""
     keep = np.ones(len(points), dtype=bool)
