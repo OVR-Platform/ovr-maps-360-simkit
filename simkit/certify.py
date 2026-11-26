@@ -68,7 +68,7 @@ def write_gate_certificate(bundle: Path, certification: Path, uuid: str) -> dict
         },
         "certified_geometry": (
             "mesh/model.glb, moved into the simulation frame and cropped to the walked corridor; "
-            "the solver touches the ground height field and the convex parts derived from it"
+            "the solver touches the ground height field and the structure boxes derived from it"
         ),
         "reproduce": f"simkit regate simulation/{scene}.sre",
     }

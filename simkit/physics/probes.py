@@ -128,6 +128,7 @@ def run_floor_probes(
     foot_half_size: float = 0.06,
     duration_s: float = 3.0,
     settle_speed: float = 0.02,
+    near_m: float = 1.0,
 ) -> PhysicsReport:
     """Drop a foot-sized box at each sample point and see what the ground does.
 
@@ -144,6 +145,23 @@ def run_floor_probes(
     root = tree.getroot()
 
     points = np.asarray(sample_points, dtype=np.float64).reshape(-1, 3)
+
+    # A probe only meets what is near it. The structure is thousands of static
+    # boxes (simkit.geometry.structure), and MuJoCo's broad phase pays for all
+    # of them on every step: 10,000 boxes took the probe run from 40 s to 180 s.
+    # Boxes more than ``near_m`` from every probe leave the probe model (the
+    # bundle keeps them all); the height field and meshes stay.
+    worldbody = root.find("worldbody")
+    if len(points):
+        for geom in list(worldbody.findall("geom")):
+            if geom.get("type") != "box":
+                continue
+            centre = np.array([float(v) for v in geom.get("pos", "0 0 0").split()])
+            half = np.array([float(v) for v in geom.get("size").split()])
+            gap = np.maximum(np.abs(points[:, :2] - centre[:2]) - half[:2], 0.0)
+            if np.hypot(gap[:, 0], gap[:, 1]).min() > near_m:
+                worldbody.remove(geom)
+
     for index, (x, y, ground_z) in enumerate(points):
         _add_probe_body(
             root,

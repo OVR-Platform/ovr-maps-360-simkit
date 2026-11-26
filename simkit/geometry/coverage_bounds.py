@@ -55,7 +55,7 @@ def uncovered_cells(navmesh, *, margin_m: float = 0.45, min_hole_m2: float = 1.0
     return big_uncovered & near_walkable
 
 
-def wall_boxes(navmesh, wall_cells: np.ndarray, *, height_m: float = 1.6, max_boxes: int = 1500):
+def wall_boxes(navmesh, wall_cells: np.ndarray, *, height_m: float = 1.6, max_boxes: int = 20_000):
     """Collision boxes tiling the wall cells exactly.
 
     Not the cluster-AABB merge used for splat obstacles: the axis-aligned box

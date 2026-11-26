@@ -77,7 +77,8 @@ def write_mjcf(
             friction="1.0 0.005 0.0001",
             contype="1",
             conaffinity="1",
-            rgba="0.3 0.4 0.8 0.3" if box.get("kind") == "coverage_wall" else "0.8 0.3 0.2 0.4",
+            rgba={"coverage_wall": "0.3 0.4 0.8 0.3", "structure": "0.6 0.6 0.6 0.5"}.get(
+                box.get("kind"), "0.8 0.3 0.2 0.4"),
         )
     ET.SubElement(
         worldbody,

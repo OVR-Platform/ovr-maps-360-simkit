@@ -89,6 +89,7 @@ def build_scene(
         Navmesh, build_navmesh, build_navmesh_levels, cell_size_for, remove_obstacles_from_levels,
     )
     from simkit.geometry.splat_obstacles import obstacle_boxes, obstacle_cells
+    from simkit.geometry.structure import structure_boxes, walkable_points_inside
     from simkit.geometry.up_check import camera_up_verdict, splat_up_verdict
     from simkit.io.splat_io import load_splat
     from simkit.photoreal import transform_splat, write_splat_ply
@@ -245,14 +246,21 @@ def build_scene(
     np.save(layout.collision / "navmesh_grid.npy", navmesh.grid)
     log(f"S5 step filter: {step_filter['area_before_m2']:.1f} -> {step_filter['area_after_m2']:.1f} m2 walkable")
 
-    # S4 - structure only; the height field owns the ground.
+    # S4 - structure only; the height field owns the ground. Columns of boxes
+    # on the navmesh's cells (simkit.geometry.structure), never over a walkable
+    # one; CoACD's tile hulls held the rooms between the walls.
     structure = above_ground_mesh(mesh, navmesh)
-    parts, collision_stats = build_collision_proxy(
-        structure, layout.collision, target_triangles=target_triangles, max_hulls=max_hulls, navmesh=navmesh,
-        workers=workers,
-    )
-    stages["s4_collision"] = collision_stats.as_dict() | {"heightfield": heightfield.as_dict()}
-    log(f"S4 collision: height field + {collision_stats.parts} convex parts")
+    ground_surface = (heightfield.elevation * heightfield.elevation_z + heightfield.z_offset)[
+        : navmesh.grid.shape[0], : navmesh.grid.shape[1]]
+    structure, structure_stats = structure_boxes(
+        navmesh, ground_surface, np.asarray(structure.vertices), np.asarray(structure.triangles))
+    (layout.collision / "structure_boxes.json").write_text(json.dumps(structure))
+    parts = []
+    every_box = structure + splat_boxes + coverage_walls
+    structure_stats["walkable_points_inside_boxes"] = walkable_points_inside(every_box, navmesh)
+    stages["s4_collision"] = structure_stats | {"heightfield": heightfield.as_dict()}
+    log(f"S4 collision: height field + {len(structure)} structure boxes "
+        f"({structure_stats['walkable_points_inside_boxes']} walkable points inside a box)")
 
     # Photoreal layer: the same splat, already carried into the frame.
     write_splat_ply(splat, layout.photoreal / "splat.ply")
@@ -267,12 +275,12 @@ def build_scene(
     mjcf_path = write_mjcf(
         parts, layout.root / "scene.xml", scene_name=f"sre_{scene_id}",
         heightfield=heightfield, heightfield_png=heightfield_png,
-        extra_boxes=splat_boxes + coverage_walls,
+        extra_boxes=every_box,
     )
     usd_path = export_usd_subprocess(
         parts, layout.root / "scene.usda", f"sre_{scene_id}",
         ground_mesh=heightfield_to_mesh(heightfield, keep_mask=ndimage.binary_dilation(navmesh.grid, iterations=6)),
-        extra_boxes=splat_boxes + coverage_walls,
+        extra_boxes=every_box,
     )
     stages["s6_export"] = {"mjcf": mjcf_path.name, "usd": usd_path.name}
 
@@ -291,7 +299,7 @@ def build_scene(
     residual = layer_residual(splat, np.asarray(mesh.vertices), np.asarray(mesh.triangles), positions,
                               corridor_m=walk_buffer_m)
     stages["s7_layer_residual"] = residual
-    registration = floor_registration(navmesh, frame.ground_points)
+    registration = floor_registration(levels, frame.ground_points)
     stages["s7_floor_registration"] = registration
     log(f"layers: splat to surface median {residual['median_m'] * 100:.1f} cm; navmesh vs walked floor "
         f"{registration.get('median_abs_m', float('nan')) * 100:.1f} cm median over "

@@ -109,7 +109,8 @@ def build_heightfield(navmesh, *, base_thickness: float = 1.0, fill_value: float
     )
 
 
-def above_ground_mesh(mesh, navmesh, *, margin: float = 0.10, reach_m: float | None = 3.0):
+def above_ground_mesh(mesh, navmesh, *, margin: float = 0.10, reach_m: float | None = 3.0,
+                      overhead_m: float = 1.6):
     """Keep only the surface that stands above the ground, within reach.
 
     What the height field already represents must not also be convex-decomposed:
@@ -122,6 +123,12 @@ def above_ground_mesh(mesh, navmesh, *, margin: float = 0.10, reach_m: float | N
     decomposing all of it exhausted a forty-minute budget without finishing. A
     collision proxy exists to be collided with; geometry beyond arm's length of
     anywhere the robot can stand is scenery, and the splat already draws it.
+
+    Overhead surface goes too: a triangle whose corners all stand over walkable
+    cells, ``overhead_m`` or more above their ground, is a ceiling or a canopy
+    (a walkable cell has nothing between 0.12 m and 1.6 m above it). It is out
+    of a walking robot's reach, and decomposed together with the walls it
+    closes the room into one hull that holds the floor.
     """
     import open3d as o3d
 
@@ -165,6 +172,8 @@ def above_ground_mesh(mesh, navmesh, *, margin: float = 0.10, reach_m: float | N
 
     keep_vertex = vertices[:, 2] > cell_ground + margin
     keep_triangle = keep_vertex[triangles].any(axis=1)
+    over_walkable = navmesh.grid[rows, columns] & (vertices[:, 2] >= navmesh.ground_z[rows, columns] + overhead_m)
+    keep_triangle &= ~over_walkable[triangles].all(axis=1)
 
     selected = triangles[keep_triangle]
     if len(selected) == 0:
@@ -200,17 +209,19 @@ def filter_navmesh_by_step(navmesh, heightfield, *, max_step_m: float = 0.06, ra
 
     The radius is the stance, not the foot: what topples the robot is a step
     anywhere its feet might be placed, not one directly underneath it.
-    """
-    from scipy import ndimage
 
+    A step is measured against the local slope (``step_span``), not as the raw
+    height range: on a street climbing 8 deg the range across a stance is 9 cm
+    with no step anywhere, and measured that way the filter dropped 86% of a
+    hillside scene's walkable area (Amazon 2ffedfc0, 13183 -> 1868 m2) and left
+    12% of the walk on the navmesh. On level ground the two measures coincide.
+    """
     from simkit.geometry.navmesh import Navmesh
 
     # World-frame heights from MuJoCo's normalised form, in the navmesh's row order.
     surface = heightfield.elevation * heightfield.elevation_z + heightfield.z_offset
     cells = max(1, int(round(radius_m / navmesh.cell_size)))
-    size = 2 * cells + 1
-    span = ndimage.maximum_filter(surface, size=size) - ndimage.minimum_filter(surface, size=size)
-    span = span[: navmesh.grid.shape[0], : navmesh.grid.shape[1]]
+    span = step_span(surface, cells)[: navmesh.grid.shape[0], : navmesh.grid.shape[1]]
 
     grid = navmesh.grid & (span <= max_step_m)
     filtered = Navmesh(grid, navmesh.ground_z, navmesh.origin, navmesh.cell_size)
@@ -220,6 +231,55 @@ def filter_navmesh_by_step(navmesh, heightfield, *, max_step_m: float = 0.06, ra
         "area_before_m2": navmesh.area_m2,
         "area_after_m2": filtered.area_m2,
     }
+
+
+def minmod(differences: np.ndarray, axis: int) -> np.ndarray:
+    """The slope every one of ``differences`` agrees on: the smallest in
+    magnitude when they all share a sign, else zero.
+
+    A uniform slope gives equal differences and is returned whole; a step makes
+    one difference large and leaves the others at the slope, so the step is not
+    absorbed into it; a slope that reverses (a ridge, a kerb's top) is no slope.
+    """
+    differences = np.asarray(differences, dtype=np.float64)
+    finite = np.isfinite(differences)
+    low = np.min(np.where(finite, differences, np.inf), axis=axis)
+    high = np.max(np.where(finite, differences, -np.inf), axis=axis)
+    slope = np.where(low > 0, low, np.where(high < 0, high, 0.0))
+    return np.where(np.isfinite(slope), slope, 0.0)
+
+
+def step_span(surface: np.ndarray, cells: int = 1) -> np.ndarray:
+    """Height range within ``cells`` of every cell once the local slope is
+    taken out: the step a stance there would have to straddle.
+
+    The slope along each axis is the ``minmod`` of the one-cell differences in
+    the window, so a ramp, a sloping street or a tilted floor contributes
+    nothing and a kerb on any of them contributes its full height.
+    """
+    from numpy.lib.stride_tricks import sliding_window_view
+
+    surface = np.asarray(surface, dtype=np.float64)
+    size = 2 * cells + 1
+    padded = np.pad(surface, cells, constant_values=np.nan)  # past the edge: unknown, not flat
+    return window_step_span(sliding_window_view(padded, (size, size)))
+
+
+def window_step_span(window: np.ndarray) -> np.ndarray:
+    """``step_span`` of square height windows (..., n, n), NaN where unknown."""
+    import warnings
+
+    window = np.asarray(window, dtype=np.float64)
+    shape, size = window.shape[:-2], window.shape[-1]
+    slope_x = minmod(np.diff(window, axis=-1).reshape(*shape, -1), axis=-1)
+    slope_y = minmod(np.diff(window, axis=-2).reshape(*shape, -1), axis=-1)
+    offset = np.arange(size, dtype=np.float64) - size // 2
+    plane = slope_y[..., None, None] * offset[:, None] + slope_x[..., None, None] * offset[None, :]
+    residual = window - plane
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", RuntimeWarning)
+        span = np.nanmax(residual, axis=(-2, -1)) - np.nanmin(residual, axis=(-2, -1))
+    return np.where(np.isfinite(span), span, 0.0)
 
 
 def to_mesh(heightfield, *, upsample: int = 4, keep_mask=None) -> tuple[np.ndarray, np.ndarray]:

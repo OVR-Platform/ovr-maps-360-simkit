@@ -342,8 +342,9 @@ def build_navmesh_levels(
 
     A kept surface then has to hold a stance: the heights of the nearest surface
     in each of the eight surrounding cells (within ``clearance_m``) must span no
-    more than ``stance_step_m``, the rule the single-level pipeline applies to
-    its height field. Stairs therefore stay out, as there.
+    more than ``stance_step_m`` once the local slope is taken out, the rule the
+    single-level pipeline applies to its height field. Stairs therefore stay
+    out, as there; a ramp stays in.
     """
     from scipy.sparse import coo_matrix
     from scipy.sparse.csgraph import connected_components
@@ -443,11 +444,16 @@ def build_navmesh_levels(
         wanted = {int(np.argmax(np.bincount(label)))}
     reached = np.isin(label, sorted(wanted))
 
-    # 4. Stance: the surrounding ground must not step more than stance_step_m.
-    stance = np.zeros(len(ids), dtype=bool)
-    for n in np.flatnonzero(reached):
+    # 4. Stance: the surrounding ground must not step more than stance_step_m,
+    # measured against the local slope (simkit.export.heightfield.step_span),
+    # so a ramp or a street on a hill is not a step.
+    from simkit.export.heightfield import window_step_span
+
+    candidates = np.flatnonzero(reached)
+    windows = np.full((len(candidates), 3, 3), np.nan)
+    for i, n in enumerate(candidates):
         r, c, z = node_row[n], node_col[n], node_z[n]
-        lo = hi = z
+        windows[i, 1, 1] = z
         for dr in (-1, 0, 1):
             for dc in (-1, 0, 1):
                 rr, cc = r + dr, c + dc
@@ -459,9 +465,9 @@ def build_navmesh_levels(
                 d = near - z
                 d = d[np.abs(d) < clearance_m]
                 if len(d):
-                    closest = z + d[np.argmin(np.abs(d))]
-                    lo, hi = min(lo, closest), max(hi, closest)
-        stance[n] = (hi - lo) <= stance_step_m
+                    windows[i, dr + 1, dc + 1] = z + d[np.argmin(np.abs(d))]
+    stance = np.zeros(len(ids), dtype=bool)
+    stance[candidates] = window_step_span(windows) <= stance_step_m
     standing = reached & stance
     kept_area = np.bincount(label[standing], minlength=label.max() + 1) * cell_size**2
     final = np.flatnonzero(standing & (kept_area[label] >= min_region_m2))

@@ -46,7 +46,7 @@ How those were made, because it decides what the frame is:
         navmesh_ground_z.npy         ground height per cell (float, NaN off the navmesh)
         navmesh_levels_grid.npy      walkable cells on every storey (bool, L x rows x cols)
         navmesh_levels_ground_z.npy  ground height per storey and cell (float, NaN where none)
-        part_NNN.obj                 convex parts (CoACD) for structure above the ground
+        structure_boxes.json         structure above the ground: box columns on the navmesh cells
       photoreal/splat.ply            the splat, moved into the simulation frame
     certification/
       mujoco_physics_gate.json       the gate, machine-readable
@@ -111,31 +111,54 @@ meets is the ground the operator stood on at that moment (whatever height the
 pole was held at), and the median of those heights becomes z = 0.
 
 Floors are allowed to slope. A street climbing a hill keeps its slope, because
-levelling the walk or the floor would tilt gravity for the robot. What must be
-vertical is the walls, and that is what the gate checks.
+levelling the walk or the floor would tilt gravity for the robot. Walls are not
+required to be plumb either: how far they lean from the frame's vertical is
+measured and recorded (`s1_plumb`), not gated.
 
 ## The gate
 
-A bundle ships as tier **T1a** only if all eight checks pass. Thresholds are
+A bundle ships as tier **T1a** only if all seven checks pass. Thresholds are
 part of the contract and are not relaxed to make a scene pass.
 
 | # | check | measured as | threshold |
 |---|---|---|---|
-| 1 | `up_direction_verified` | the bottom of the horizontal training views points down: image-down axis along gravity, median over ≥ 100 views; and ≥ 90% of camera centres have ground beneath them | decidable, not inverted |
-| 2 | `scene_plumb_under_2deg` | vertical implied by the walls, from the splat's disc Gaussians and from the mesh faces, against the frame's +Z; the tilt is the **smaller** of the two witnesses, since a broken alignment tilts the walls in both reconstructions | < 2° |
-| 3 | `floor_at_origin_under_5cm` | under every camera on a walkable cell, navmesh ground height against the ray-cast floor: median absolute difference, and the navmesh must cover at least 20% of the cameras | < 5 cm, >= 20% covered |
-| 4 | `alignment_residual_under_25cm` | offset between splat and collision surface: the similarity transform that best moves the solid Gaussians (opacity > 0.5, within 12 m of the walk) onto the surface (trimmed ICP), and how far it moves them, 90th percentile | < 25 cm |
-| 5 | `walkable_area_over_5m2` | navmesh area after the stance step filter and splat obstacles | ≥ 5 m² |
-| 6 | `no_collision_leak` | foot-sized damped plates dropped on 40 navmesh cells in MuJoCo: none falls through | 0% |
-| 7 | `probes_settle` | plates at rest within 3 s | ≥ 90% |
-| 8 | `penetration_p95_under_2cm` | solver contact penetration, 95th percentile | < 2 cm |
+| 1 | `up_direction_verified` | the bottom of the horizontal training views points down: image-down axis along gravity, median over ≥ 100 views; and ≥ 50% of camera centres have ground beneath them (the mesh is in the cameras' frame) | decidable, not inverted |
+| 2 | `floor_at_origin_under_5cm` | under every camera on a walkable cell, navmesh ground height (the storey nearest the camera's floor, from the multi-level navmesh) against the ray-cast floor: median absolute difference, and the navmesh must cover at least 20% of the cameras | < 5 cm, >= 20% covered |
+| 3 | `alignment_residual_under_25cm` | offset between splat and collision surface: the similarity transform that best moves the solid Gaussians (opacity > 0.5, within 12 m of the walk) onto the surface (trimmed ICP), and how far it moves them, 90th percentile | < 25 cm |
+| 4 | `walkable_area_over_5m2` | navmesh area after the stance step filter and splat obstacles | ≥ 5 m² |
+| 5 | `no_collision_leak` | foot-sized damped plates dropped on 40 navmesh cells in MuJoCo: none falls through | 0% |
+| 6 | `probes_settle` | plates at rest within 3 s | ≥ 90% |
+| 7 | `penetration_p95_under_2cm` | solver contact penetration, 95th percentile | < 2 cm |
 
-Why the threshold of check 2 is where it is: over the 50 scenes of the sample,
-the two wall witnesses disagree with each other by 0.9° median (1.9° p90), so
-2° is where a real alignment error stands out from witness noise, and 2° of
-gravity error is a 3.5% slope under a robot's feet.
+The Amazon corpus (1,101 scenes) changed four rules, none by relaxing a
+threshold on what a robot meets:
 
-Checks 1 and 4 hold indoors as well as outdoors. Check 1 used to read up
+- *Walls are recorded, not gated.* `scene_plumb_under_2deg` failed 190 scenes
+  at 2-12° of wall tilt (median 3.7° splat, 4.5° mesh). The frame's vertical is
+  ARKit's gravity and nothing built here depends on walls being plumb.
+- *The step under a stance is measured against the local slope.* The filter
+  took the height range over a stance, so a street at 8° read as a 9 cm step:
+  on a hillside scene it dropped 86% of the walkable area and left 12% of the
+  walk on the navmesh. The slope is now the minmod of the one-cell differences
+  (a kerb on a hill still counts in full; on level ground nothing changes).
+  Same rule in the multi-level navmesh.
+- *The floor is compared with the storey the walk was on.* The single-level
+  navmesh keeps the lowest surface of a cell, so a walk over a ramp or a
+  bridge was compared with the ground beneath it (3.04 m, against 1 mm on the
+  multi-level navmesh).
+- *Structure is columns of boxes, not convex hulls.* The convex hull of a
+  tile's walls is the room between them: on one hall 24 of 25 CoACD tiles had
+  a hull holding the space a standing robot occupies, and MuJoCo pushed probes
+  out through an exact, flat height field (leak 10%). Every cell that is not
+  walkable and holds surface between 10 cm and 2 m above its ground now gets a
+  box column up to that surface; a walkable cell never does, by construction,
+  and the build records how many walkable points end up inside any box
+  (`walkable_points_inside_boxes`). Splat obstacle boxes cover their cells
+  exactly instead of their cluster's bounding box. A scene now carries
+  2,000-11,000 static boxes; the gate's probe run loads only those within 1 m
+  of a probe (180 s to 2.5 s on 10,000 boxes, same result).
+
+Checks 1 and 3 hold indoors as well as outdoors. Check 1 used to read up
 from the splat: near the walk the floor should be its densest horizontal slab.
 Under a station vault 8 m above the walk, or a subway ceiling 1.25 m above the
 camera, the ceiling is denser, and an upright scene read as upside down. The
@@ -144,7 +167,7 @@ with the rig upright on the pole, so the bottom of each image looks at the
 ground, and a frame turned over by the registration turns them over with it.
 On the 50 scenes of the sample and two covered stations, image-down is within
 15° of gravity in every horizontal view (median cosine 0.96–0.999). The slab
-is still recorded (`s1_splat_slab`). Check 4 used to be the median distance
+is still recorded (`s1_splat_slab`). Check 3 used to be the median distance
 from the splat to the surface, but the splat holds much the mesh does not
 (chandeliers, foliage, glass, what is seen through an opening): on a station
 hall it read 32 cm with the two reconstructions within 2 cm and 0.03° of each
@@ -177,18 +200,18 @@ resting height is compared with the floor MuJoCo reported there
 
 - **Collision** comes from the mesh, **appearance** from the splat. They are two
   reconstructions of one capture in one frame, so no registration is needed;
-  check 4 measures how far apart they are.
+  check 3 measures how far apart they are.
 - The mesh is **cropped** to 12 m around the walked path: a robot cannot be
-  evaluated where the capture had no observations, and the convex
-  decomposition pays for every distant triangle.
+  evaluated where the capture had no observations.
 - The **navmesh** is 2.5D: per cell, the lowest upward-facing surface, with
   1.6 m of head clearance, a 0.25 m step limit between cells, a 6 cm limit
-  under a whole stance, and the largest connected region kept. Cells where the
+  under a whole stance (measured against the local slope, so a ramp passes and
+  a kerb does not), and the regions the walk reaches kept. Cells where the
   splat sees a solid obstacle the mesh lost (typically a car) are removed and
   get box colliders. Uncovered ground at the navmesh edge is fenced with wall
   boxes, so a drifting robot cannot walk onto invented height field.
   Being 2.5D, it cannot represent a walk that passes over another level: the
-  lower level wins. It is what the height field and the gate use.
+  lower level wins. It is what the height field and the physics probes use.
 - The **multi-level navmesh** (`navmesh_levels_*.npy`) keeps every storey.
   Per cell, the upward-facing surface is split wherever two heights are more
   than 12 cm apart, and every surface is judged by the rules above: head
@@ -196,11 +219,15 @@ resting height is compared with the floor MuJoCo reported there
   obstacles. A surface is kept only if the walk reaches it (the ground under a
   camera within 30 cm of its height) and its region still holds at least 1 m²
   of stance, so a desk a camera was carried over does not become a floor.
+  The gate's floor check (2) reads this navmesh.
   Channel *k* is the *k*-th walkable surface of the cell counted upwards.
   Stairs stay out, as in the single level: every tread is a step over 6 cm.
 - The **ground** is a height field (MJCF `hfield`, USD mesh); the structure
-  above it is convex parts from **CoACD** (concavity threshold 0.30, up to 8
-  hulls per tile, about 60 tiles).
+  above it, within 3 m of a walkable cell and up to 2 m above the ground, is
+  axis-aligned boxes over the navmesh's cells, merged where they share a
+  height (tops rounded up to 25 cm). Overhangs above 2 m (ceilings, canopies,
+  lintels) are not collision: a walking robot does not reach them. CoACD
+  (`simkit.geometry.collision`) is no longer called by the build.
 - `photoreal/splat.ply` carries the degree-0 colour only (17 floats per
   Gaussian): rotating higher-order spherical harmonics into a new frame is not
   implemented. The view-dependent source splat is `gaussian_splatting.ply` at

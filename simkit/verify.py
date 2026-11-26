@@ -40,8 +40,8 @@ def verify_scene_outputs(root: Path) -> list[str]:
     for path in expected:
         if not path.is_file():
             problems.append(f"missing {path.relative_to(root)}")
-    if not list((bundle / "collision").glob("part_*.obj")):
-        problems.append("no convex parts in collision/")
+    if not list((bundle / "collision").glob("part_*.obj")) and not (bundle / "collision" / "structure_boxes.json").is_file():
+        problems.append("no structure in collision/ (structure_boxes.json or convex parts)")
 
     produced = [root / name for name in ("lod", "simulation", "datasheets") if (root / name).exists()]
     for top in produced:

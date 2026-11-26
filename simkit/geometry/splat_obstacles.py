@@ -53,39 +53,17 @@ def obstacle_cells(
     return grid
 
 
-def obstacle_boxes(navmesh, blocked: np.ndarray, *, height_m: float = 1.6, max_boxes: int = 150):
-    """Axis-aligned collision boxes over splat-witnessed obstacle clusters.
+def obstacle_boxes(navmesh, blocked: np.ndarray, *, height_m: float = 1.6, max_boxes: int = 1500):
+    """Collision boxes over the splat-witnessed obstacle cells.
 
-    Merged with the same greedy sweep as everything else grid-shaped here. The
-    boxes are deliberately generous — full band height over the whole blocked
-    cell — because their job is to stop a walking robot, not to model a car.
+    Full band height over every blocked cell, because their job is to stop a
+    walking robot, not to model a car. They cover the blocked cells exactly
+    (``coverage_bounds.wall_boxes``): they used to be the bounding box of each
+    cluster, and the bounding box of an L-shaped cluster covers walkable cells.
     """
-    from scipy import ndimage
+    from simkit.geometry.coverage_bounds import wall_boxes
 
-    labels, count = ndimage.label(blocked)
-    boxes = []
-    for index in range(1, count + 1):
-        cells = np.argwhere(labels == index)
-        if len(cells) == 0:
-            continue
-        row_low, col_low = cells.min(axis=0)
-        row_high, col_high = cells.max(axis=0)
-        ground = navmesh.ground_z[cells[:, 0], cells[:, 1]]
-        base = float(np.nanmin(ground)) if np.isfinite(ground).any() else 0.0
-        centre = navmesh.origin + np.array([
-            (col_low + col_high + 1) / 2 * navmesh.cell_size,
-            (row_low + row_high + 1) / 2 * navmesh.cell_size,
-        ])
-        half = np.array([
-            (col_high - col_low + 1) / 2 * navmesh.cell_size,
-            (row_high - row_low + 1) / 2 * navmesh.cell_size,
-            height_m / 2,
-        ])
-        boxes.append({
-            "centre": [float(centre[0]), float(centre[1]), base + height_m / 2],
-            "half_extents": half.tolist(),
-            "cells": int(len(cells)),
-        })
-        if len(boxes) >= max_boxes:
-            break
+    boxes = wall_boxes(navmesh, blocked, height_m=height_m, max_boxes=max_boxes)
+    for box in boxes:
+        box["kind"] = "splat_obstacle"
     return boxes
