@@ -193,8 +193,11 @@ to the ground. The share of the walk that lies on walkable cells
 
 **Isaac Sim** is checked separately and reported, not certified: a 5 cm rigid
 sphere is released 1 m above a point where a MuJoCo probe settled, and its
-resting height is compared with the floor MuJoCo reported there
-(`isaac_drop_test.json`). A sphere that falls through fails the scene.
+resting height is compared with the navmesh floor where it came to rest
+(`isaac_drop_test.json`, with `rolled_m`). A sphere that falls through fails
+the scene. On a sloping street the sphere rolls: Amazon 2ffedfc0 read 30.65 cm
+below the floor of the drop point, resting 3.0 m downhill 2.07 cm above the
+floor there.
 
 ## The bundle, in detail
 

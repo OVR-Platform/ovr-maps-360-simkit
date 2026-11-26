@@ -70,11 +70,12 @@ def main() -> None:
             simulation.step(render=False)
 
         prim = stage.GetPrimAtPath(probe_path)
-        resting = float(
+        where = (
             UsdGeom.Xformable(prim)
             .ComputeLocalToWorldTransform(Usd.TimeCode.Default())
-            .ExtractTranslation()[2]
+            .ExtractTranslation()
         )
+        resting = float(where[2])
         simulation.stop()
         simulation.clear_instance()
 
@@ -82,6 +83,9 @@ def main() -> None:
             "engine": "Isaac Sim (PhysX), headless",
             "floor_from_mujoco": floor,
             "resting_z": resting,
+            # A sphere rolls downhill on a sloping street; where it stopped is
+            # needed to compare it with the floor there, not at the drop point.
+            "resting_xy": [float(where[0]), float(where[1])],
             "error_m": resting - (floor + 0.05),
             "fell_through": resting < floor - 0.5,
         })

@@ -171,6 +171,13 @@ def run_isaac_drop_test(bundle: Path, certification: Path, uuid: str, *, isaac_p
         raw.unlink(missing_ok=True)
 
     manifest = json.loads((bundle / "manifest.json").read_text())
+    # Compare with the floor where the sphere came to rest: on a slope it rolls
+    # (Amazon 2ffedfc0, an 8 deg street: 30.65 cm "below" the drop point's floor,
+    # resting on the floor 1.9 m downhill).
+    rest_xy = result.get("resting_xy", [x, y])
+    floor_there = floor_at(bundle, manifest, rest_xy, default=floor)
+    error_m = result["resting_z"] - (floor_there + 0.05)
+    fell = bool(result["resting_z"] < floor_there - 0.5)
     record = {
         "scene": manifest["scene_id"],
         "uuid": uuid,
@@ -182,14 +189,29 @@ def run_isaac_drop_test(bundle: Path, certification: Path, uuid: str, *, isaac_p
             "The gate itself runs in MuJoCo."
         ),
         "floor_from_mujoco_m": round(floor, 4),
+        "dropped_at_xy": [round(x, 3), round(y, 3)],
+        "resting_xy_isaac": [round(v, 3) for v in rest_xy],
+        "rolled_m": round(float(np.hypot(rest_xy[0] - x, rest_xy[1] - y)), 3),
+        "floor_where_it_rests_m": round(floor_there, 4),
         "resting_z_isaac_m": round(result["resting_z"], 5),
-        "disagreement_cm": round(result["error_m"] * 100, 2),
-        "fell_through": bool(result["fell_through"]),
+        "disagreement_cm": round(error_m * 100, 2),
+        "fell_through": fell,
         "navmesh_cell_size_m": manifest["stages"]["s5_navmesh"]["cell_size_m"],
-        "verdict": "fell through the floor" if result["fell_through"] else "solid, no fall-through",
+        "verdict": "fell through the floor" if fell else "solid, no fall-through",
     }
     (certification / "isaac_drop_test.json").write_text(json.dumps(record, indent=1))
     return record
+
+
+def floor_at(bundle: Path, manifest: dict, xy, *, default: float) -> float:
+    """Navmesh ground under ``xy`` (the cell's height, single level)."""
+    navmesh = manifest["stages"]["s5_navmesh"]
+    ground = np.load(bundle / "collision" / "navmesh_ground_z.npy")
+    col = int(np.floor((xy[0] - navmesh["origin_xy"][0]) / navmesh["cell_size_m"]))
+    row = int(np.floor((xy[1] - navmesh["origin_xy"][1]) / navmesh["cell_size_m"]))
+    if 0 <= row < ground.shape[0] and 0 <= col < ground.shape[1] and np.isfinite(ground[row, col]):
+        return float(ground[row, col])
+    return default
 
 
 def write_datasheet(bundle: Path, datasheet: Path, uuid: str, *, isaac: dict | None) -> dict:
