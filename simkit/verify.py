@@ -123,7 +123,9 @@ def _check_frame(bundle: Path) -> list[str]:
     problems = []
     if inside < 0.9:
         problems.append(f"only {inside:.0%} of the collision surface lies inside the splat's extent")
-    floor = float(np.median(vertices[:, 2]))
-    if not (-1.0 < floor < 1.0) and abs(np.percentile(vertices[:, 2], 10)) > 1.0:
-        problems.append(f"collision surface not near z = 0 (median z {floor:.2f} m)")
+    # Where the floor is, is the gate's floor_at_origin_under_5cm (navmesh
+    # against the ground under the cameras), checked above with the verdict.
+    # The surface's own heights say nothing about it: in a narrow street the
+    # facades outnumber the floor (Amazon 334d0460, median z 1.23 m, T1a with
+    # the floor registered), and a sloping walk runs metres away from z = 0.
     return problems

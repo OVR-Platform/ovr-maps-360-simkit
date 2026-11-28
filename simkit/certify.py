@@ -167,7 +167,7 @@ def run_isaac_drop_test(bundle: Path, certification: Path, uuid: str, *, isaac_p
     import fcntl
     import tempfile
 
-    command += [f"--kit-arg={arg}" for arg in os.environ.get("SIMKIT_ISAAC_KIT_ARGS", "").split()]
+    command += [f"--kit-arg={arg}" for arg in ISAAC_KIT_ARGS + os.environ.get("SIMKIT_ISAAC_KIT_ARGS", "").split()]
     try:
         with open(Path(tempfile.gettempdir()) / "simkit-isaac.lock", "w") as lock:
             fcntl.flock(lock, fcntl.LOCK_EX)
@@ -216,6 +216,15 @@ def run_isaac_drop_test(bundle: Path, certification: Path, uuid: str, *, isaac_p
 
 
 ISAAC_RADIUS_M = 15.0
+# Kit's DerivedDataCache (isaacsim/kit/cache) has no budget by default: on the
+# Amazon fleet it reached 94-106 GB, every Isaac killed mid-run left it
+# corrupt, and the next start rebuilt its index in RAM (0.25 GB/s up to the
+# OOM killer, even on an empty stage). With a budget it stays at 64 MB and
+# Isaac at 4.5 GB (.205, measured). Moving it with /app/tokens/cache does not.
+ISAAC_KIT_ARGS = [
+    "--/UJITSO/datastore/localDataStore/largeChunkDiskBudgetMB=2048",
+    "--/UJITSO/datastore/localDataStore/smallChunkDiskBudgetMB=256",
+]
 # Isaac needs about 6 GB here (an empty stage takes as much). On the Amazon
 # fleet it grew 0.25 GB/s with no plateau until the kernel killed it, taking
 # the machine's memory with it; past this it is stopped and the build fails.

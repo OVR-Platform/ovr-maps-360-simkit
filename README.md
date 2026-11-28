@@ -201,7 +201,11 @@ floor there. Isaac gets the bundle's `scene.usda` cropped to a 30 m square
 around the drop point, prims authored as in the bundle (`stage_given_to_isaac`
 in the certificate): the whole stage of Amazon 04802a70 (2.3M ground
 triangles, 9284 boxes) took 14 GB and 9 minutes here and was OOM-killed on
-62 GB machines; cropped, 6 GB and 38 s.
+62 GB machines; cropped, 6 GB and 38 s. Isaac runs with a budget on Kit's DerivedDataCache
+(2 GB): without one the cache grew to ~100 GB per machine and, once a killed
+run had corrupted it, the next start rebuilt it in RAM until the OOM killer
+came; a watchdog stops Isaac above `SIMKIT_ISAAC_MAX_RSS_GB` (16), and
+`SIMKIT_ISAAC_KIT_ARGS` adds Kit settings.
 
 ## The bundle, in detail
 
