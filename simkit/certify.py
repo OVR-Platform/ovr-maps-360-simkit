@@ -167,10 +167,11 @@ def run_isaac_drop_test(bundle: Path, certification: Path, uuid: str, *, isaac_p
     import fcntl
     import tempfile
 
-    with open(Path(tempfile.gettempdir()) / "simkit-isaac.lock", "w") as lock:
-        fcntl.flock(lock, fcntl.LOCK_EX)
-        completed = run_capped(command, env=env, timeout_s=timeout_s, max_rss_gb=ISAAC_MAX_RSS_GB)
+    command += [f"--kit-arg={arg}" for arg in os.environ.get("SIMKIT_ISAAC_KIT_ARGS", "").split()]
     try:
+        with open(Path(tempfile.gettempdir()) / "simkit-isaac.lock", "w") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            completed = run_capped(command, env=env, timeout_s=timeout_s, max_rss_gb=ISAAC_MAX_RSS_GB)
         if completed.returncode != 0 or not raw.exists():
             raise RuntimeError(f"Isaac drop test failed (exit {completed.returncode}):\n{completed.stderr[-2000:]}")
         result = json.loads(raw.read_text())[0]

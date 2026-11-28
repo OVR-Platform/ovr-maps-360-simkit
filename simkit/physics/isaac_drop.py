@@ -33,13 +33,15 @@ def main() -> None:
     parser.add_argument("--drop-from", type=float, default=1.0)
     parser.add_argument("--steps", type=int, default=300)
     parser.add_argument("--json", help="write the result here")
+    parser.add_argument("--kit-arg", action="append", default=[],
+                        help="repeatable; passed to Kit, e.g. --kit-arg=--/some/setting=value")
     args = parser.parse_args()
 
     os.environ.setdefault("OMNI_KIT_ACCEPT_EULA", "YES")
 
     from isaacsim.simulation_app import SimulationApp
 
-    app = SimulationApp({"headless": True})
+    app = SimulationApp({"headless": True, "extra_args": args.kit_arg})
 
     from pxr import Gf, Usd, UsdGeom, UsdPhysics
 
