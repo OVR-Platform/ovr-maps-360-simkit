@@ -169,7 +169,7 @@ def run_isaac_drop_test(bundle: Path, certification: Path, uuid: str, *, isaac_p
 
     with open(Path(tempfile.gettempdir()) / "simkit-isaac.lock", "w") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
-        completed = subprocess.run(command, env=env, capture_output=True, text=True, timeout=timeout_s)
+        completed = run_capped(command, env=env, timeout_s=timeout_s, max_rss_gb=ISAAC_MAX_RSS_GB)
     try:
         if completed.returncode != 0 or not raw.exists():
             raise RuntimeError(f"Isaac drop test failed (exit {completed.returncode}):\n{completed.stderr[-2000:]}")
@@ -205,6 +205,8 @@ def run_isaac_drop_test(bundle: Path, certification: Path, uuid: str, *, isaac_p
         "disagreement_cm": round(error_m * 100, 2),
         "fell_through": fell,
         "stage_given_to_isaac": cropped,
+        "isaac_peak_rss_gb": round(completed.peak_rss_gb, 2),
+        "isaac_seconds": round(completed.seconds, 1),
         "navmesh_cell_size_m": manifest["stages"]["s5_navmesh"]["cell_size_m"],
         "verdict": "fell through the floor" if fell else "solid, no fall-through",
     }
@@ -213,6 +215,63 @@ def run_isaac_drop_test(bundle: Path, certification: Path, uuid: str, *, isaac_p
 
 
 ISAAC_RADIUS_M = 15.0
+# Isaac needs about 6 GB here (an empty stage takes as much). On the Amazon
+# fleet it grew 0.25 GB/s with no plateau until the kernel killed it, taking
+# the machine's memory with it; past this it is stopped and the build fails.
+ISAAC_MAX_RSS_GB = float(os.environ.get("SIMKIT_ISAAC_MAX_RSS_GB", "16"))
+
+
+def run_capped(command, *, env, timeout_s: float, max_rss_gb: float) -> subprocess.CompletedProcess:
+    """``subprocess.run`` that kills the process tree when its resident memory passes ``max_rss_gb``."""
+    import signal
+    import tempfile
+    import time
+
+    with tempfile.TemporaryFile("w+") as out, tempfile.TemporaryFile("w+") as err:
+        process = subprocess.Popen(command, env=env, stdout=out, stderr=err, text=True, start_new_session=True)
+        started, peak, reason = time.monotonic(), 0.0, None
+        while process.poll() is None:
+            rss = _tree_rss_gb(process.pid)
+            peak = max(peak, rss)
+            if rss > max_rss_gb:
+                reason = f"Isaac exceeded {max_rss_gb:g} GB resident ({rss:.1f} GB)"
+            elif time.monotonic() - started > timeout_s:
+                reason = f"Isaac took more than {timeout_s:g} s"
+            if reason:
+                os.killpg(process.pid, signal.SIGKILL)
+                process.wait()
+                break
+            time.sleep(1.0)
+        out.seek(0)
+        err.seek(0)
+        stderr = err.read()
+        if reason:
+            raise RuntimeError(f"{reason}; stopped after {time.monotonic() - started:.0f} s:\n{stderr[-2000:]}")
+        completed = subprocess.CompletedProcess(command, process.returncode, out.read(), stderr)
+        completed.peak_rss_gb = peak
+        completed.seconds = time.monotonic() - started
+        return completed
+
+
+def _tree_rss_gb(root: int) -> float:
+    """Resident memory of a process and its descendants, from /proc."""
+    children: dict[int, list[int]] = {}
+    rss: dict[int, int] = {}
+    for entry in Path("/proc").iterdir():
+        if not entry.name.isdigit():
+            continue
+        try:
+            fields = (entry / "stat").read_text().rsplit(")", 1)[1].split()
+            children.setdefault(int(fields[1]), []).append(int(entry.name))
+            rss[int(entry.name)] = int(fields[21]) * os.sysconf("SC_PAGE_SIZE")
+        except (OSError, IndexError, ValueError):
+            continue
+    total, stack = 0, [root]
+    while stack:
+        pid = stack.pop()
+        total += rss.get(pid, 0)
+        stack.extend(children.get(pid, []))
+    return total / 2**30
 
 
 def crop_usd_around(source: Path, target: Path, xy, *, radius_m: float) -> dict:
