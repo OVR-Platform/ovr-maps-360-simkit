@@ -147,12 +147,19 @@ def run_isaac_drop_test(bundle: Path, certification: Path, uuid: str, *, isaac_p
     x, y, floor = drop_point(bundle)
     raw = certification / "_isaac_raw.json"
     certification.mkdir(parents=True, exist_ok=True)
+    # Isaac gets only the scene around the drop point. The whole stage (Amazon
+    # 04802a70: a 1M-triangle ground and 6548 boxes) took 14 GB here and was
+    # OOM-killed on 62 GB machines; the sphere only ever touches a few metres.
+    local = certification / "_isaac_local.usda"
+    cropped = crop_usd_around(bundle / "scene.usda", local, (x, y), radius_m=ISAAC_RADIUS_M)
     repo = Path(__file__).resolve().parents[1]
     env = dict(os.environ, PYTHONPATH=str(repo) + os.pathsep + os.environ.get("PYTHONPATH", ""))
     command = [
         isaac_python, "-m", "simkit.physics.isaac_drop",
-        "--usd", str((bundle / "scene.usda").resolve()),
-        "--at", f"{x}", f"{y}", f"{floor}",
+        "--usd", str(local.resolve()),
+        # Fixed-point: argparse reads "-1.2e-05" as an option, not a number
+        # (Amazon 179f346d: "usage: isaac_drop.py ...").
+        "--at", f"{x:.6f}", f"{y:.6f}", f"{floor:.6f}",
         "--drop-from", str(drop_from), "--steps", str(steps), "--json", str(raw.resolve()),
     ]
     # One Isaac Sim at a time per machine: concurrent instances abort (SIGABRT)
@@ -169,6 +176,7 @@ def run_isaac_drop_test(bundle: Path, certification: Path, uuid: str, *, isaac_p
         result = json.loads(raw.read_text())[0]
     finally:
         raw.unlink(missing_ok=True)
+        local.unlink(missing_ok=True)
 
     manifest = json.loads((bundle / "manifest.json").read_text())
     # Compare with the floor where the sphere came to rest: on a slope it rolls
@@ -196,11 +204,73 @@ def run_isaac_drop_test(bundle: Path, certification: Path, uuid: str, *, isaac_p
         "resting_z_isaac_m": round(result["resting_z"], 5),
         "disagreement_cm": round(error_m * 100, 2),
         "fell_through": fell,
+        "stage_given_to_isaac": cropped,
         "navmesh_cell_size_m": manifest["stages"]["s5_navmesh"]["cell_size_m"],
         "verdict": "fell through the floor" if fell else "solid, no fall-through",
     }
     (certification / "isaac_drop_test.json").write_text(json.dumps(record, indent=1))
     return record
+
+
+ISAAC_RADIUS_M = 15.0
+
+
+def crop_usd_around(source: Path, target: Path, xy, *, radius_m: float) -> dict:
+    """Copy of the stage keeping the colliders within ``radius_m`` (XY) of ``xy``.
+
+    Boxes farther away are dropped and the ground mesh keeps only the triangles
+    with a vertex inside the square window; every kept prim is authored exactly
+    as in the bundle, so the test is still a test of the exported USD.
+    """
+    from pxr import Gf, Usd, UsdGeom, Vt
+
+    stage = Usd.Stage.Open(str(source))
+    x0, y0 = float(xy[0]), float(xy[1])
+    boxes_kept = boxes_dropped = ground_before = ground_after = 0
+    for prim in list(stage.Traverse()):
+        if prim.IsA(UsdGeom.Cube):
+            centre = translate = scale = None
+            for op in UsdGeom.Xformable(prim).GetOrderedXformOps():
+                if op.GetOpType() == UsdGeom.XformOp.TypeTranslate:
+                    translate = op.Get()
+                elif op.GetOpType() == UsdGeom.XformOp.TypeScale:
+                    scale = op.Get()
+            if translate is None:
+                boxes_kept += 1
+                continue
+            centre = np.array([translate[0], translate[1]])
+            half = np.abs(np.array([scale[0], scale[1]])) if scale is not None else np.ones(2)
+            gap = np.maximum(np.abs(centre - [x0, y0]) - half, 0.0)
+            if np.hypot(*gap) > radius_m:
+                stage.RemovePrim(prim.GetPath())
+                boxes_dropped += 1
+            else:
+                boxes_kept += 1
+        elif prim.IsA(UsdGeom.Mesh):
+            mesh = UsdGeom.Mesh(prim)
+            points = np.asarray(mesh.GetPointsAttr().Get(), dtype=np.float64)
+            counts = np.asarray(mesh.GetFaceVertexCountsAttr().Get())
+            if len(points) == 0 or not np.all(counts == 3):
+                continue
+            faces = np.asarray(mesh.GetFaceVertexIndicesAttr().Get()).reshape(-1, 3)
+            inside = (np.abs(points[:, 0] - x0) <= radius_m) & (np.abs(points[:, 1] - y0) <= radius_m)
+            keep = inside[faces].any(axis=1)
+            ground_before += len(faces)
+            faces = faces[keep]
+            used, faces = np.unique(faces, return_inverse=True)
+            faces = faces.reshape(-1, 3)
+            points = points[used]
+            ground_after += len(faces)
+            mesh.GetPointsAttr().Set(Vt.Vec3fArray.FromNumpy(points.astype(np.float32)))
+            mesh.GetFaceVertexCountsAttr().Set(Vt.IntArray.FromNumpy(np.full(len(faces), 3, dtype=np.int32)))
+            mesh.GetFaceVertexIndicesAttr().Set(Vt.IntArray.FromNumpy(faces.reshape(-1).astype(np.int32)))
+            if len(points):
+                mesh.GetExtentAttr().Set(Vt.Vec3fArray([Gf.Vec3f(*map(float, points.min(axis=0))),
+                                                         Gf.Vec3f(*map(float, points.max(axis=0)))]))
+    stage.Export(str(target))
+    return {"window": f"{2 * radius_m:.0f} m square around the drop point",
+            "boxes_kept": boxes_kept, "boxes_dropped": boxes_dropped,
+            "mesh_triangles_kept": ground_after, "mesh_triangles_in_bundle": ground_before}
 
 
 def floor_at(bundle: Path, manifest: dict, xy, *, default: float) -> float:

@@ -197,7 +197,11 @@ resting height is compared with the navmesh floor where it came to rest
 (`isaac_drop_test.json`, with `rolled_m`). A sphere that falls through fails
 the scene. On a sloping street the sphere rolls: Amazon 2ffedfc0 read 30.65 cm
 below the floor of the drop point, resting 3.0 m downhill 2.07 cm above the
-floor there.
+floor there. Isaac gets the bundle's `scene.usda` cropped to a 30 m square
+around the drop point, prims authored as in the bundle (`stage_given_to_isaac`
+in the certificate): the whole stage of Amazon 04802a70 (2.3M ground
+triangles, 9284 boxes) took 14 GB and 9 minutes here and was OOM-killed on
+62 GB machines; cropped, 6 GB and 38 s.
 
 ## The bundle, in detail
 
